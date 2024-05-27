@@ -57,7 +57,7 @@ public class MainActivity extends AppCompatActivity {
 
     private TextView frameSizeTextView;
     private TextView fpsTextView;
-    private boolean isPICO = true;
+    private boolean isPICO = false;
     private InferenceTFLite srTFLite;
     private int[] outPixels;
 

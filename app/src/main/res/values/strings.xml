@@ -1,4 +1,5 @@
 <resources>
     <string name="app_name">ffmpegVideoPlayer</string>
-    <string name="video_url">rtsp://172.18.166.246:8554/mystream</string>
+    <string name="video_url">rtsp://172.18.233.92:8554/video</string>
+<!--    <string name="video_url">rtsp://192.168.137.1:8554/video</string>-->
 </resources>

@@ -12,9 +12,11 @@
 // Or, in MainActivity.kt:
 //    companion object {
 //      init {
+
 //         System.loadLibrary("ffmpegvideoplayer")
 //      }
 //    }
+//要在Java中引入C++代码，您需要使用Java Native Interface（JNI）来实现Java和C++之间的交互
 
 extern  "C" {
 #include <libavformat/avformat.h>
@@ -22,28 +24,29 @@ extern  "C" {
 #include <libavutil/avutil.h>
 }
 
-#include <jni.h>
+#include <jni.h> // java native interface , java-c++接口函数
 #include <string>
 #include <thread>
 #include <vector>
 #include <stdlib.h>
 #include <chrono>
 #include <android/log.h>
-#include "Streamplayer.h"
+#include "Streamplayer.h" // streamplayer 类实现在这个头文件中
 
 #define LOG_TAG "MyNativeCode"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
-JavaVM* javaVM;
 
+// Android NDK 相关
+JavaVM* javaVM;
 JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
     javaVM = vm;
     return JNI_VERSION_1_6;
 }
 
-
+// 调用的代码
 extern "C" JNIEXPORT void JNICALL
 Java_com_example_ffmpegvideoplayer_MainActivity_mainDecoder(JNIEnv* env, jobject instance, jstring url) {
-    StreamPlayer player(javaVM, url);
+    StreamPlayer player(javaVM, url); // 创建一个player 类
     player.start();
 }
 

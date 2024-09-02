@@ -31,7 +31,8 @@ import java.nio.ByteBuffer;
 public class InferenceTFLite {
     private Interpreter tflite;
     Interpreter.Options options = new Interpreter.Options();
-    private String MODEL_FILE = "quicsr_270p.tflite";
+    private String MODEL_FILE = "quicsr_float32_270pto1080p.tflite";
+//    private String MODEL_FILE = "quicsr_270p.tflite";
     private final Size INPNUT_SIZE = new Size(480, 270);
     private final int[] OUTPUT_SIZE = new int[] {1, 540, 960, 3};
     private Boolean IS_INT8 = false;
@@ -68,9 +69,11 @@ public class InferenceTFLite {
         return OUTPUT_SIZE;
     }
 
-    public TensorBuffer superResolution(TensorImage modelInput) {
+    // 这里超分直接返回的是tensorBuffer，并没有进行后续的转换bitmap等操作
+    public TensorBuffer superResolution(TensorImage modelInput , int [] tf_output_shape) {
         TensorBuffer hwcOutputTensorBuffer;
-        hwcOutputTensorBuffer = TensorBuffer.createFixedSize(OUTPUT_SIZE, DataType.FLOAT32);
+        int[] output_size = new int[] {1 , tf_output_shape[1] , tf_output_shape[0] , 3};
+        hwcOutputTensorBuffer = TensorBuffer.createFixedSize(output_size, DataType.FLOAT32);
         if (tflite != null) {
             tflite.run(modelInput.getBuffer(), hwcOutputTensorBuffer.getBuffer());
         }

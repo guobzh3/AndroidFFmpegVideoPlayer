@@ -8,11 +8,13 @@ android {
 
     defaultConfig {
         applicationId = "com.example.ffmpegvideoplayer"
-        minSdk = 24
+        minSdk = 26
         targetSdk = 34
         versionCode = 1
         versionName = "1.0"
-
+//        加入renderscript 相关的依赖项目
+//        renderscriptTargetApi = 24
+//        renderscriptSupportModeEnabled = true
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         externalNativeBuild {
             cmake {
@@ -35,6 +37,7 @@ android {
         sourceCompatibility = JavaVersion.VERSION_1_8
         targetCompatibility = JavaVersion.VERSION_1_8
     }
+//    本地c++链接库
     externalNativeBuild {
         cmake {
             path = file("src/main/cpp/CMakeLists.txt")
@@ -43,6 +46,16 @@ android {
     }
     buildFeatures {
         mlModelBinding = true
+    }
+    sourceSets {
+        getByName("main") {
+            renderscript {
+                srcDirs("src\\main\\rs", "src\\main\\rs", "src\\main\\rs", "src\\main\\rs",
+                    "src\\main\\rs",
+                    "src\\main\\rs"
+                )
+            }
+        }
     }
 }
 

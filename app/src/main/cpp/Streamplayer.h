@@ -2,6 +2,7 @@
 // Created by chaibli on 2024/5/21.
 //
 
+// JNI 定义了两个关键数据结构，即“JavaVM”和“JNIEnv”。两者本质上都是指向函数表的指针。 JavaVM 提供“调用接口”函数，用于创建和销毁 JavaVM；JNIEnv 提供了大部分 JNI 函数。您的原生函数都会接收 JNIEnv 作为第一个参数
 #ifndef FFMPEGVIDEOPLAYER_STREAMPLAYER_H
 #define FFMPEGVIDEOPLAYER_STREAMPLAYER_H
 
@@ -20,7 +21,8 @@ extern  "C" {
 #include <android/log.h>
 
 #define LOG_TAG "MyNativeCode"
-#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
+#define TIME_TAG "time"
+#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TIME_TAG, __VA_ARGS__)
 
 class StreamPlayer {
 public:
@@ -28,46 +30,57 @@ public:
     jclass cls;
     jmethodID funcMethod;
 
-    AVFormatContext* deFormatc;
-    AVCodecContext* deCodecc;
+    AVFormatContext* deFormatc; // 是一个FormatContext
+    AVCodecContext* deCodecc; // 是一个CodecContext
     int video_index;
     int frame_decoded_count;
 
     StreamPlayer(JavaVM* javaVM, jstring url) {
+        // javaVM ： java线程的句柄
+        // 要在jni代码的线程中调用java代码的方法，必须把当前线程连接到VM中，获取到一个[JNIEnv*].
+        // 该 JNIEnv 将用于线程本地存储。因此，您无法在线程之间共享 JNIEnv。如果代码段无法通过其他方法获取其 JNIEnv，您应该共享 JavaVM，并使用 GetEnv 发现线程的 JNIEnv。（假设该线程包含一个 JNIEnv；请参阅下面的 AttachCurrentThread。
+        // 将jvm附加到当前线程，后面才可以进行JNI调用
+        // 通过 JNI 附加的线程必须在退出之前调用 DetachCurrentThread()
+//        LOGI("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
         if (javaVM->AttachCurrentThread(&env, nullptr) != 0) {
             LOGI("Failed to attach current thread");
             throw std::runtime_error("Failed to attach current thread");
         }
+        // 找到这个java中中class ? 这个有什么用？
         cls = env->FindClass("com/example/ffmpegvideoplayer/MainActivity");
+
         if (cls == nullptr) {
             LOGI("Failed to find class MainActivity");
             if (env->ExceptionCheck()) {
                 env->ExceptionDescribe();
                 env->ExceptionClear();
             }
-            javaVM->DetachCurrentThread();
+            javaVM->DetachCurrentThread(); // 通过 JNI 附加的线程必须在退出之前调用 DetachCurrentThread()
             throw std::runtime_error("Failed to find class MainActivity");
         }
+        // 获取在MainActivity中定义的 putData 方法
         this->funcMethod = env->GetStaticMethodID(cls, "putData", "([I)V");
 
         this->frame_decoded_count = 0;
-        this->deFormatc = createFormatc(url);
-        this->deCodecc = createCodecc(this->deFormatc);
+        this->deFormatc = createFormatc(url); // 用于读取packet av_read_frame(this->deFormatc, input_packet);
+        this->deCodecc = createCodecc(this->deFormatc); // 用于对packet进行解码，avcodec_send_packet(this->deCodecc, received_packet); avcodec_receive_frame(this->deCodecc, input_frame);
     }
 
     AVFormatContext* createFormatc(jstring url) {
+        // 是一个网址链接
         const char* video_address = env->GetStringUTFChars(url, nullptr);
         LOGI("%s", video_address);
         // create decoder
-        AVFormatContext* av_formatc = avformat_alloc_context();
+        AVFormatContext* av_formatc = avformat_alloc_context(); // avformat_alloc_context();
         if (!av_formatc) {
             LOGI("Failed to alloc memory for avformat");
             throw std::runtime_error("Failed to alloc memory for avformat");
         }
-        // setting params
-        AVDictionary* opts = nullptr;
-        av_dict_set(&opts, "rtsp_transport", "tcp", 0);
-        // open video
+        // setting params 配置参数
+        AVDictionary* opts = nullptr; // 是ffmpeg中用来存储选项的结构体
+        av_dict_set(&opts, "rtsp_transport", "tcp", 0); // 指定tcp作为RTSP的传输协议
+        // open video 打开文件（注意设置了option参数）
+//        int ret = avformat_open_input(av_formatc,video_address, nullptr , &opts);
         int ret = avformat_open_input(&av_formatc, video_address, nullptr, &opts);
         if (ret != 0) {
             LOGI("Failed to open input file");
@@ -76,12 +89,13 @@ public:
         // find the input stream
         // it will be blocked if broadcaster doesn't send the stream
         LOGI("Waiting for the stream ...");
+        // 获取视频流信息，保存在 av_formatc 中
         ret = avformat_find_stream_info(av_formatc, nullptr);
         if (ret != 0) {
             LOGI("Failed to get stream info");
             throw std::runtime_error("Failed to get stream info");
         }
-        return av_formatc;
+        return av_formatc; // 返回了avformatc
     }
 
     AVCodecContext* createCodecc(AVFormatContext* avFormatc) {
@@ -90,7 +104,7 @@ public:
             throw std::runtime_error("de_formatc is nullptr!");
         }
         AVStream* de_stream = nullptr;
-        // find stream index
+        // find stream index（获取视频流的stream）
         for (int i = 0; i < avFormatc->nb_streams; i++) {
             if (avFormatc->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
                 video_index = i;
@@ -105,19 +119,20 @@ public:
             throw std::runtime_error("Failed to find the de_codec");
         }
         // use the de_codec to create de_codec_context
-        AVCodecContext* de_codecc = avcodec_alloc_context3(de_codec);
+        AVCodecContext* de_codecc = avcodec_alloc_context3(de_codec); //创建一个适配该codec的 codec_context
         if (!de_codecc) {
             LOGI("Failed to alloc memory for de_codec context");
             throw std::runtime_error("Failed to alloc memory for de_codec context");
         }
         // copy the params from de_stream to de_codec_context
+        //
         int ret = avcodec_parameters_to_context(de_codecc, de_stream->codecpar);
         if (ret < 0) {
             LOGI("Failed to copy the params to de_codec context");
             throw std::runtime_error("Failed to copy the params to de_codec context");
         }
         de_codecc->thread_count = 16;
-        ret = avcodec_open2(de_codecc, de_codec, nullptr);
+        ret = avcodec_open2(de_codecc, de_codec, nullptr); // 打开编码器
         if (ret < 0) {
             LOGI("Failed to open de_codecc");
             throw std::runtime_error("Failed to open de_codecc");
@@ -131,15 +146,17 @@ public:
         int packet_num = 0;
         bool stop = false;
         while (!stop) {
-            int ret = av_read_frame(this->deFormatc, input_packet);
+            int ret = av_read_frame(this->deFormatc, input_packet); // 使用函数 av_read_frame 读取帧数据来填充数据包，注意第一个参数是AvFormatContext*
             if (ret < 0) {
                 LOGI("Receiving ret < 0!");
-                stop = true;
-            } else {
+                stop = true; // 此时停止
+            }
+            else {
                 // skip audio stream, just process video stream
                 if (input_packet->stream_index != this->video_index) {
                     continue;
                 }
+                // 对packet进行解码
                 ret = decoding(input_packet);
                 if (ret < 0) {
                     LOGI("Decoding Error");
@@ -156,7 +173,11 @@ public:
         av_packet_free(&input_packet);
         LOGI("Receiving done!");
     }
-
+    /**
+     * 对packet进行解码
+     * @param received_packet
+     * @return
+     */
     int decoding(AVPacket* received_packet) {
         AVFrame* input_frame = av_frame_alloc();
         int ret = avcodec_send_packet(this->deCodecc, received_packet);
@@ -168,16 +189,16 @@ public:
             ret = avcodec_receive_frame(this->deCodecc, input_frame);
             if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
                 break;
-            } else if (ret < 0) {
+            }
+            else if (ret < 0) {
                 LOGI("Error while receiving frame from decoder");
                 return ret;
             }
 
-            auto startTime = std::chrono::high_resolution_clock::now();
+            // 将解码得到的avframe 从 YUV 转化为 ARGB8888格式
             ret = avFrameYUV420ToARGB8888(input_frame);
-            auto endTime = std::chrono::high_resolution_clock::now();
-            auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime);
-            LOGI("avFrameYUV420ToARGB8888 cost Time = %f ms", (double)(duration.count()) );
+
+
 
             if (ret < 0) {
                 LOGI("Error! avFrameYUV420ToARGB8888");
@@ -213,24 +234,26 @@ public:
     int avFrameYUV420ToARGB8888(AVFrame* frame) {
         int width = frame->width;
         int height = frame->height;
+//      创建一个新的jintArray
         jintArray outFrame = env->NewIntArray(width * height);
         if (outFrame == nullptr) {
             LOGI("Failed to allocate memory");
             return -1;
         }
-
-        jint* outData = env->GetIntArrayElements(outFrame, nullptr);
+        // 获取新建的jintArray的指针，后续可以将数据存放在该array中
+        jint* outData = env->GetIntArrayElements(outFrame, nullptr); // 返回具体元素的指针
         if (outData == nullptr) {
             LOGI("outData is nullptr");
             return -1;
         }
-
+        auto startTime = std::chrono::high_resolution_clock::now();
         // process
 //        int thread_num = 2;
 //        std::vector<std::thread> process_thread(thread_num);
 //        for (int th = 0; th < thread_num; th++) {
 //            process_thread[th] = std::thread(
 //                        [&frame, &outData, width, height, th, thread_num]() {
+//                            LOGI( "decode thread :%d ",th );
 //                            int yp = (height / thread_num) * width * th;
 //                            int endIn = th < (thread_num - 1) ? (height / thread_num) * th + (height / thread_num) : height;
 //                            for (int j = (height / thread_num) * th; j < endIn; j++) {
@@ -284,22 +307,31 @@ public:
 //        );
 //        for (auto& th: process_thread) th.join();
 
+        // linesize[0~2] 分别对应了YUV通道
         int yp = 0;
         for (int j = 0; j < height; j++) {
+            // 找到该行开始位置的索引
             int pY = frame->linesize[0] * j;
-            int pU = (frame->linesize[1]) * (j >> 1);
-            int pV = (frame->linesize[2]) * (j >> 1);
+            int pU = (frame->linesize[1]) * (j >> 1); // 左移一位，就是除以2，因为两行Y共用一行 U 的数据
+            int pV = (frame->linesize[2]) * (j >> 1); // 左移一位，就是除以2，因为两行Y共用一行 V 的数据
             for (int i = 0; i < width; i++) {
                 int yData = frame->data[0][pY + i];
-                int uData = frame->data[1][pU + (i >> 1)];
-                int vData = frame->data[2][pV + (i >> 1)];
-                outData[yp++] = YUV2RGB(0xff & yData, 0xff & uData, 0xff & vData);
+                int uData = frame->data[1][pU + (i >> 1)]; // 左移一位，就是除以2，因为两列Y共用一行 U 的数据
+                int vData = frame->data[2][pV + (i >> 1)]; // 左移一位，就是除以2，因为两列Y共用一行 V 的数据
+                outData[yp++] = YUV2RGB(0xff & yData, 0xff & uData, 0xff & vData); // 转化为RGB
             }
         }
 
+        auto endTime = std::chrono::high_resolution_clock::now();
+        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime);
+        LOGI("avFrameYUV420ToARGB8888 cost Time = %f ms", (double)(duration.count()) );
+        // 释放c++中的数组元素，并同步回java层
         env->ReleaseIntArrayElements(outFrame, outData, 0);
+        // 调用外部的java函数，将解码得到的数据存放到了队列中；其他的线程检测到这个队列中有数据了，就可以获取数据并进行推理了
+        // this->cls: 表示要调用的方法所属的 Java 类的引用,this->funcMethod: 表示要调用的 Java 静态方法的引用,outFrame: 传递给 Java 静态方法的参数，即解码后的 jintArray
+        // cls是MainAcitivity，method 是 MainActivity中的putData函数，outFrame是传递给java方法的参数（jint* 指针）
         env->CallStaticVoidMethod(this->cls, this->funcMethod, outFrame);
-        env->DeleteLocalRef(outFrame);
+        env->DeleteLocalRef(outFrame); // 删除本地引用，防止内存泄漏
         return 0;
     }
 

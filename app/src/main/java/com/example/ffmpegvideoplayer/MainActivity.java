@@ -1,5 +1,8 @@
 package com.example.ffmpegvideoplayer; // 这里引入了这个ffmpegVIdeoplayer的库
 
+import android.app.ActivityManager;
+import android.content.Context;
+import android.content.pm.ConfigurationInfo;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Matrix;
@@ -12,7 +15,7 @@ import android.graphics.Rect;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
-import android.renderscript.ScriptIntrinsicResize;
+//import android.renderscript.ScriptIntrinsicResize;
 import android.util.Log;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
@@ -39,15 +42,17 @@ import org.tensorflow.lite.support.image.ops.ResizeOp;
 import org.tensorflow.lite.support.tensorbuffer.TensorBuffer;
 
 // renderscript 相关
-import android.content.Context;
-import android.graphics.Bitmap;
-import android.renderscript.Allocation;
-import android.renderscript.Element;
-import android.renderscript.RenderScript;
-import android.renderscript.ScriptC;
+//import android.content.Context;
+//import android.graphics.Bitmap;
+//import android.renderscript.Allocation;
+//import android.renderscript.Element;
+//import android.renderscript.RenderScript;
+//import android.renderscript.ScriptC;
 
 import android.opengl.GLES31;
-//GLES31.
+import android.opengl.GLSurfaceView;
+import android.opengl.GLES20;
+
 
 public class MainActivity extends AppCompatActivity {
 
@@ -87,52 +92,58 @@ public class MainActivity extends AppCompatActivity {
     private ImageView imageView;
     private Handler handler;
 
+    // 创建一个GLSurfaceView
+    private GLSurfaceView mGLSurfaceView;
+
     private TextView frameSizeTextView;
     private TextView fpsTextView;
-    private boolean isPICO = true;
+    private boolean isPICO = true ;
     private InferenceTFLite srTFLite;
     private int[] outPixels;
 
+    private MyRenderer renderer;
     Bitmap inputBitmap;
     Bitmap outputBitmap;
 
     ImageProcessor imageProcessor , bilinear_processor;
-    public Bitmap applyBlur(Context context, Bitmap inputBitmap, float blurRadius) {
-        // 创建RenderScript实例
-        RenderScript rs = RenderScript.create(context);
-
-        // 创建输入和输出Allocation
-        Allocation inputAllocation = Allocation.createFromBitmap(rs, inputBitmap);
-        Allocation outputAllocation = Allocation.createTyped(rs, inputAllocation.getType());
-
-        // 加载RenderScript脚本
-
-//        ScriptC_try blurScript = new ScriptC_try(rs);
-//        blurScript.set_inImage(inputAllocation);
-//        blurScript.set_outImage(outputAllocation);
-//        blurScript.set_blurRadius(blurRadius);
+//    public Bitmap applyBlur(Context context, Bitmap inputBitmap, float blurRadius) {
+//        // 创建RenderScript实例
+//        RenderScript rs = RenderScript.create(context);
 //
-//        // 执行模糊操作
-//        blurScript.invoke_root();
-
-        // 创建输出位图并复制数据
-        Bitmap outputBitmap = Bitmap.createBitmap(inputBitmap.getWidth(), inputBitmap.getHeight(), inputBitmap.getConfig());
-        outputAllocation.copyTo(outputBitmap);
-
-        // 销毁资源和清理
-        inputAllocation.destroy();
-        outputAllocation.destroy();
-        rs.destroy();
-
-        return outputBitmap;
-    }
+//        // 创建输入和输出Allocation
+//        Allocation inputAllocation = Allocation.createFromBitmap(rs, inputBitmap);
+//        Allocation outputAllocation = Allocation.createTyped(rs, inputAllocation.getType());
+//
+//        // 加载RenderScript脚本
+//
+////        ScriptC_try blurScript = new ScriptC_try(rs);
+////        blurScript.set_inImage(inputAllocation);
+////        blurScript.set_outImage(outputAllocation);
+////        blurScript.set_blurRadius(blurRadius);
+////
+////        // 执行模糊操作
+////        blurScript.invoke_root();
+//
+//        // 创建输出位图并复制数据
+//        Bitmap outputBitmap = Bitmap.createBitmap(inputBitmap.getWidth(), inputBitmap.getHeight(), inputBitmap.getConfig());
+//        outputAllocation.copyTo(outputBitmap);
+//
+//        // 销毁资源和清理
+//        inputAllocation.destroy();
+//        outputAllocation.destroy();
+//        rs.destroy();
+//
+//        return outputBitmap;
+//    }
 
     private void initModel() {
         try {
             this.srTFLite = new InferenceTFLite();
             if (isPICO) {
                 this.srTFLite.addGPUDelegate(); // pico的话，使用GPU代理
+                Log.i("dada","111");
             } else {
+                Log.i("dada","dada");
                 this.srTFLite.addNNApiDelegate();
             }
 //            this.srTFLite.addNNApiDelegate();
@@ -145,12 +156,37 @@ public class MainActivity extends AppCompatActivity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         EdgeToEdge.enable(this); // 启用一个无边框的沉浸式布局
-        setContentView(R.layout.activity_main);
 
+        // 初始化GLSurfaceView
+        mGLSurfaceView = new GLSurfaceView(this);
+        final ActivityManager activityManager = (ActivityManager) getSystemService(Context.ACTIVITY_SERVICE);
+        final ConfigurationInfo configurationInfo = activityManager.getDeviceConfigurationInfo();
+        final boolean supportsEs2 = configurationInfo.reqGlEsVersion >= 0x20000;
+
+        if (supportsEs2)
+        {
+            // Request an OpenGL ES 2.0 compatible context.
+            mGLSurfaceView.setEGLContextClientVersion(2);
+
+            // Set the renderer to our demo renderer, defined below.
+            // 我只需要修改这个setrenderer就可以展示我自己设计的renderer了 ！yes！
+//			mGLSurfaceView.setRenderer(new LessonFourRenderer(this));
+            renderer = new MyRenderer(this);
+            mGLSurfaceView.setRenderer(renderer);
+            Log.i("gles","support GLES");
+        }
+        else{
+            Log.e("gles","not support GLES");
+            return ;
+        }
+
+        setContentView(mGLSurfaceView);
+
+//        setContentView(R.layout.activity_main);
         // params
-        surfaceView = findViewById(R.id.surfaceView);
-        surfaceHolder = surfaceView.getHolder(); //获取对低层surface的访问
-        imageView = findViewById(R.id.imageView);
+//        surfaceView = findViewById(R.id.surfaceView);
+//        surfaceHolder = surfaceView.getHolder(); //获取对低层surface的访问
+//        imageView = findViewById(R.id.imageView);
         /**
          * 用于线程管理：
              * Looper 是一个循环，负责管理和分发线程中的消息和任务队列。
@@ -170,9 +206,9 @@ public class MainActivity extends AppCompatActivity {
                 .add(new NormalizeOp(0, 255))
                 .build();
 
-        bilinear_processor = new ImageProcessor.Builder()
-                .add(new ResizeOp(video_output_shape.getHeight() , video_output_shape.getWidth(),ResizeOp.ResizeMethod.BILINEAR))
-                .build();
+//        bilinear_processor = new ImageProcessor.Builder()
+//                .add(new ResizeOp(video_output_shape.getHeight() , video_output_shape.getWidth(),ResizeOp.ResizeMethod.BILINEAR))
+//                .build();
 
         // 模型初始化
         initModel();
@@ -232,6 +268,7 @@ public class MainActivity extends AppCompatActivity {
                             outHeight = video_input_shape[0];
                             outWidth = video_input_shape[1];
                         }
+
                         Canvas canvas = surfaceHolder.lockCanvas();
                         if (canvas != null) {
                             try{
@@ -240,9 +277,10 @@ public class MainActivity extends AppCompatActivity {
                                 surfaceHolder.unlockCanvasAndPost(canvas);
                             }
                         }
+
                         long endTime = System.currentTimeMillis();
                         long costTime = endTime - startTime;
-                        updateTextView(Long.toString(costTime) + "ms");
+//                        updateTextView(Long.toString(costTime) + "ms");
                     } catch (InterruptedException e) {
                         Log.e("Error Exception", "MainActivity error: " + e.getMessage() + e.toString());
                         Thread.currentThread().interrupt();
@@ -460,18 +498,25 @@ public class MainActivity extends AppCompatActivity {
                                 outPixels[yp++] = 0xff000000 | (r << 16 & 0xff0000) | (g << 8 & 0xff00) | (b & 0xff);
                             }
                         }
+                        Bitmap srBitmap = Bitmap.createBitmap(tf_output_shape[1],tf_output_shape[0], Bitmap.Config.ARGB_8888);
+                        srBitmap.setPixels(outPixels,0,tf_output_shape[1],0,0,tf_output_shape[1],tf_output_shape[0]);
+
                         end_time = System.currentTimeMillis();
                         cost_time = end_time - start_time;
                         Log.i(time_tag , "inference post_process time: " + cost_time + " ms");
                         // TODO：从bisr队列中获取bi放大的bitmap，然后将outPixels填充到对应的位置中（不知道能不能直接填充）
                         Bitmap outBitmap = biSROutputQueue.take();
+                        renderer.set_bi_Bitmap(outBitmap);
+                        renderer.set_sr_bitmap(srBitmap);
+                        renderer.updateSurface_Flag = true;
                         start_time = System.currentTimeMillis();
 //                        int bitmapWidth = outBitmap.getWidth();
 //                        int bitmapHeight = outBitmap.getHeight();
 //                        Log.i(mytag, "run: " + bitmapWidth +  ' ' + bitmapHeight); // 3840 2160
 //                        Log.i(mytag , "x: "+tile_index[0] * tf_output_shape[0] + " width: "+tf_output_shape[0] + " bitmap_width: "+ outBitmap.getWidth());
                         // stride 要填写要填入的patch的width值
-                        outBitmap.setPixels(outPixels , 0 , tf_output_shape[0] , tile_index[0] * tf_output_shape[0]  , tile_index[1] * tf_output_shape[1]  , tf_output_shape[0] , tf_output_shape[1]);
+                        // 这句话是把sr patch拷贝到outBitmap对应的位置，暂时注释掉
+//                        outBitmap.setPixels(outPixels , 0 , tf_output_shape[0] , tile_index[0] * tf_output_shape[0]  , tile_index[1] * tf_output_shape[1]  , tf_output_shape[0] , tf_output_shape[1]);
 //                        outBitmap.setPixels(outPixels , 0 , tf_output_shape[0] , tile_index[0] * tf_output_shape[0] , tile_index[1] * tf_output_shape[1] , tf_output_shape[0] , tf_output_shape[1]);
 
                      // 这里有问题-> 单独把这部分的东西显示出来看看（这里推理完是没错的，应该就是setpixels的问题 ）
@@ -492,12 +537,12 @@ public class MainActivity extends AppCompatActivity {
                         // 使用创建的 Handler 对象，将一个任务（更新 ImageView 的图像）发送到主线程执行。
                         // tips：在 Android 中，所有的 UI 操作必须在主线程（UI 线程）上进行。如果你在后台线程（如异步任务或网络操作线程）上尝试更新 UI，会导致应用崩溃。这是因为 Android 的 UI 组件不是线程安全的。
                         // 只有主线程可以更新视图
-                        handler.post(()-> imageView.setImageBitmap(postTransformImageBitmap));
+//                        handler.post(()-> imageView.setImageBitmap(postTransformImageBitmap));
                         end_time = System.currentTimeMillis();
                         cost_time = end_time - start_time;
 //                        long endTime = System.currentTimeMillis();
 //                        long costTime = endTime - startTime;
-                        updateTextView(Long.toString(cost_time) + "ms");
+//                        updateTextView(Long.toString(cost_time) + "ms");
                         Log.i(time_tag, "concat and show time : " + cost_time + " ms");
                     }
                     catch (InterruptedException e) {
@@ -624,8 +669,8 @@ public class MainActivity extends AppCompatActivity {
                             matrix.postRotate(90);
                         }
                         Bitmap postTransformImageBitmap = Bitmap.createBitmap(outBitmap, 0, 0, outWidth, outHeight, matrix, false);
-
-                        handler.post(()-> imageView.setImageBitmap(postTransformImageBitmap));
+                        // 先注释掉，使用GLSurfaceView来进行视图更新
+//                        handler.post(()-> imageView.setImageBitmap(postTransformImageBitmap));
                         long endTime = System.currentTimeMillis();
                         long costTime = endTime - startTime;
                         updateTextView(Long.toString(costTime) + "ms");

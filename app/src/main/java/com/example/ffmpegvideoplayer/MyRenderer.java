@@ -17,8 +17,13 @@ import android.opengl.GLES20;
 import android.opengl.GLSurfaceView;
 import android.opengl.GLUtils;
 import android.opengl.Matrix;
+import android.os.Environment;
 import android.os.SystemClock;
 import android.util.Log;
+
+import java.io.File;
+import java.io.OutputStream;
+import java.io.FileOutputStream;
 
 import com.example.ffmpegvideoplayer.R;
 import com.example.ffmpegvideoplayer.RawResourceReader;
@@ -32,6 +37,7 @@ public class MyRenderer implements GLSurfaceView.Renderer {
     private String shader_tag = "shader";
     // context（这个是干啥用的）
     private final Context mActivityContext;
+    private long start_time , end_time , cost_time ;
 
     // 世界顶点数据
     final float[] vertex_points;
@@ -47,7 +53,8 @@ public class MyRenderer implements GLSurfaceView.Renderer {
     // 两个着色器的顶点数量
     private final int position_data_size = 4;
     private final int color_data_size = 4;
-
+    private int width;
+    private int height;
     // 程序句柄
     private int program_handle;
     // 着色器句柄
@@ -74,6 +81,8 @@ public class MyRenderer implements GLSurfaceView.Renderer {
     FloatBuffer vertex_buffer;
     FloatBuffer vertex_buffer_2;
     FloatBuffer fragment_buffer;
+
+    private Bitmap test_bitmap;
 
     //    FloatBuffer fragment_buffer_2;
 //
@@ -268,18 +277,17 @@ public class MyRenderer implements GLSurfaceView.Renderer {
 //        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D , mTextureDataHandle[1]);
 
         // 设置缩小和放大使用的算法
-        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_NEAREST);
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR);
         GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR);
         // 设置超出的时候的填充算法
-        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE);
-        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE);
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_REPEAT);
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_REPEAT);
 
-//        final BitmapFactory.Options options = new BitmapFactory.Options();
-//        options.inScaled = false;	// No pre-scaling 不进行预缩放（默认情况下，Android会根据设备的分辨率和你放置图片的资源文件目录而预先缩放位图。我们不希望Android根据我们的情况对位图进行缩放，因此我们将inScaled设置为false）
+        final BitmapFactory.Options options = new BitmapFactory.Options();
+        options.inScaled = false;	// No pre-scaling 不进行预缩放（默认情况下，Android会根据设备的分辨率和你放置图片的资源文件目录而预先缩放位图。我们不希望Android根据我们的情况对位图进行缩放，因此我们将inScaled设置为false）
 
-        // Read in the resource
-//        final Bitmap bitmap = BitmapFactory.decodeResource(mActivityContext.getResources(), R.drawable.wechat_pic, options);
-//
+        test_bitmap = BitmapFactory.decodeResource(mActivityContext.getResources(), R.drawable.wechat_pic, options);
+
 //        // 在opengl 中绑定纹理资源
 //        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D , mTextureDataHandle[0]);
 //
@@ -306,7 +314,11 @@ public class MyRenderer implements GLSurfaceView.Renderer {
     @Override
     // 刷新一下页面就完事
     public void onSurfaceChanged(GL10 gl10, int width, int height) {
-        GLES20.glViewport(0, 0, 3840, 2160);
+        width = 3840;
+        height = 2160;
+        GLES20.glViewport(0, 0, width, height);
+        this.width = width;
+        this.height = height;
 //        GLES20.glViewport(0, 0, width, height);
     }
 
@@ -317,11 +329,11 @@ public class MyRenderer implements GLSurfaceView.Renderer {
             return;
         }
         else {
+            start_time = System.currentTimeMillis();
             // 获取 attribute 属性的句柄
             GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT | GLES20.GL_DEPTH_BUFFER_BIT);
             // 设置使用的着色器程序
             GLES20.glUseProgram(program_handle);
-
             mPosition_handle = GLES20.glGetAttribLocation(program_handle, "a_position");
             mcord_handle = GLES20.glGetAttribLocation(program_handle, "a_coord");
             int u_Texture_location = GLES20.glGetUniformLocation(program_handle, "u_Texture");
@@ -352,10 +364,10 @@ public class MyRenderer implements GLSurfaceView.Renderer {
             Log.i(gl_tag, "draw sr ");
 
             // 画第二个图
-            GLES20.glActiveTexture(GLES20.GL_TEXTURE1);
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
             GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, this.bi_pic, 0);
             GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, mTextureDataHandle[0]);
-            GLES20.glUniform1i(u_Texture_location, 1); // 纹理单位 1
+            GLES20.glUniform1i(u_Texture_location, 0); // 纹理单位 1
             ////
             vertex_buffer.position(0);
             GLES20.glVertexAttribPointer(mPosition_handle, 2, GLES20.GL_FLOAT, false, 0, vertex_buffer);
@@ -364,6 +376,7 @@ public class MyRenderer implements GLSurfaceView.Renderer {
             fragment_buffer.position(0);
             GLES20.glVertexAttribPointer(mcord_handle, 2, GLES20.GL_FLOAT, false, 0, fragment_buffer);
             GLES20.glEnableVertexAttribArray(mcord_handle);
+
             //
             //        GLES20.glActiveTexture(GLES20.GL_TEXTURE1); //激活第二个纹理——激活纹理单元意味着接下来的所有纹理绑定操作都将作用于这个纹理单元。
             //        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D , texture2_id); // 绑定纹理到激活的纹理中
@@ -371,9 +384,12 @@ public class MyRenderer implements GLSurfaceView.Renderer {
             //
             GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4);
             //        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_FAN, 0, 4 );
-
+            end_time = System.currentTimeMillis();
+            cost_time = end_time - start_time;
+            Log.i("time" , "gl render time: " + cost_time + " ms");
             Log.i(gl_tag, "draw bi");
-            this.updateSurface_Flag = false;
+            readBufferPixelToBitmap(this.width,this.height);
+//            this.updateSurface_Flag = false;
         }
     }
 
@@ -383,6 +399,44 @@ public class MyRenderer implements GLSurfaceView.Renderer {
 
     public void set_sr_bitmap(Bitmap pic) { // 对应 mTextureHandle[0]
         this.sr_pic = pic;
+    }
+
+    public void readBufferPixelToBitmap(int width, int height) {
+        ByteBuffer buf = ByteBuffer.allocateDirect(width * height * 4);
+        buf.order(ByteOrder.nativeOrder());
+        Bitmap bmp = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
+        GLES20.glReadPixels(0, 0, width, height, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, buf);
+        buf.rewind();
+
+        bmp.copyPixelsFromBuffer(buf);
+        Log.i("save_img" , Environment.getExternalStorageDirectory().getAbsolutePath());
+//        String dir = Environment.getExternalStorageDirectory().getAbsolutePath() + "/save_rendered_frames";
+        //获取内部存储状态
+        String state = Environment.getExternalStorageState();
+        //如果状态不是mounted，无法读写
+        if (!state.equals(Environment.MEDIA_MOUNTED)) {
+            Log.i("save_img","state error");
+            return ;
+        }
+        else {
+            Log.i("save_img" , "state good");
+        }
+//        保存文件
+//        String fileName = "test_save_4k_image";
+        try {
+            File file = new File(Environment.getExternalStorageDirectory()+"/test_save_4k_image.jpg");
+            FileOutputStream out = new FileOutputStream(file);
+            bmp.compress(Bitmap.CompressFormat.JPEG, 100, out);
+            out.flush();
+            out.close();
+            Log.i("save_img","success save");
+        } catch (Exception e) {
+            Log.i("save_img","save_error");
+
+            e.printStackTrace();
+        }
+
+//        return bmp;
     }
 
 }

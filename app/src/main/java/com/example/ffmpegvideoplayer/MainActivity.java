@@ -22,7 +22,7 @@ import android.view.SurfaceView;
 import android.widget.ImageView;
 import android.widget.TextView;
 
-import androidx.activity.EdgeToEdge;
+//import androidx.activity.EdgeToEdge;
 import androidx.annotation.NonNull;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.graphics.Insets;
@@ -64,7 +64,7 @@ public class MainActivity extends AppCompatActivity {
     // 通过队列来构建流水线
     private static BlockingQueue<int[]> rgbBytesQueue = new ArrayBlockingQueue<>(QUEUE_CAPACITY);
     private static BlockingQueue<TensorImage> modelInputQueue = new ArrayBlockingQueue<>(QUEUE_CAPACITY);
-    private static BlockingQueue<TensorBuffer> modelOutputQueue = new ArrayBlockingQueue<>(16);
+    private static BlockingQueue<TensorBuffer> modelOutputQueue = new ArrayBlockingQueue<>(8);
     private static BlockingQueue<int[]> viewOutQueue = new ArrayBlockingQueue<>(QUEUE_CAPACITY);
     // 存储 BISR 后的结果
     private final static String mytag = "MyNativeCode";
@@ -88,6 +88,8 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private SurfaceView surfaceView;
+
+    private GLSurfaceView glsurfacebview;
     private SurfaceHolder surfaceHolder;
     private ImageView imageView;
     private Handler handler;
@@ -105,7 +107,7 @@ public class MainActivity extends AppCompatActivity {
     Bitmap inputBitmap;
     Bitmap outputBitmap;
 
-    ImageProcessor imageProcessor , bilinear_processor;
+    ImageProcessor imageProcessor ;
 //    public Bitmap applyBlur(Context context, Bitmap inputBitmap, float blurRadius) {
 //        // 创建RenderScript实例
 //        RenderScript rs = RenderScript.create(context);
@@ -137,16 +139,22 @@ public class MainActivity extends AppCompatActivity {
 //    }
 
     private void initModel() {
+        Log.i("dada","initModel. ispico : " + (this.isPICO));
+
         try {
             this.srTFLite = new InferenceTFLite();
-            if (isPICO) {
+
+            if (this.isPICO) {
                 this.srTFLite.addGPUDelegate(); // pico的话，使用GPU代理
-                Log.i("dada","111");
-            } else {
-                Log.i("dada","dada");
+                Log.i("dada","addGPUDelegate");
+
+            }
+            else {
+                Log.i("dada","addNNApiDelegate");
                 this.srTFLite.addNNApiDelegate();
             }
 //            this.srTFLite.addNNApiDelegate();
+
             this.srTFLite.initialModel(this);
         } catch (Exception e) {
             Log.e("Error Exception", "MainActivity initial model error: " + e.getMessage() + e.toString());
@@ -155,7 +163,7 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        EdgeToEdge.enable(this); // 启用一个无边框的沉浸式布局
+//        EdgeToEdge.enable(this); // 启用一个无边框的沉浸式布局
 
         // 初始化GLSurfaceView
         mGLSurfaceView = new GLSurfaceView(this);
@@ -173,16 +181,19 @@ public class MainActivity extends AppCompatActivity {
 //			mGLSurfaceView.setRenderer(new LessonFourRenderer(this));
             renderer = new MyRenderer(this);
             mGLSurfaceView.setRenderer(renderer);
+            mGLSurfaceView.setRenderMode(GLSurfaceView.RENDERMODE_WHEN_DIRTY);
             Log.i("gles","support GLES");
         }
         else{
             Log.e("gles","not support GLES");
             return ;
         }
-
+//        LinearLayout layout = findViewById(R.id.layout);
         setContentView(mGLSurfaceView);
 
 //        setContentView(R.layout.activity_main);
+//        glsurfacebview = findViewById(R.id.glsurfaceview);
+//        glsurfacebview.setRenderer(renderer);
         // params
 //        surfaceView = findViewById(R.id.surfaceView);
 //        surfaceHolder = surfaceView.getHolder(); //获取对低层surface的访问
@@ -358,29 +369,16 @@ public class MainActivity extends AppCompatActivity {
                         Bitmap rgbBitmap = Bitmap.createBitmap(video_input_shape[0], video_input_shape[1], Bitmap.Config.ARGB_8888);
                         rgbBitmap.setPixels(rgbData, 0, video_input_shape[0],  0,  0, video_input_shape[0], video_input_shape[1]);
 //                        BitmapFactory.de
-                        start_time = System.currentTimeMillis();
+//                        start_time = System.currentTimeMillis();
                         // 1. 使用Bitmap.createScaledBitmap 接口进行bilinear放大
-                        Bitmap dst = Bitmap.createScaledBitmap(rgbBitmap, video_output_shape.getWidth(),video_output_shape.getHeight() , true);
-                        // 尝试使用GPU进行bilinear
-//                        BitmapFactory.Options options;
-//                        ScriptIntrinsicResize resizeScript = ScriptIntrinsicResize.create(rs);
-//                        options.inPreferredConfig = Bitmap.Config.HARDWARE;
-//                        BitmapFactory.decodeStream(InputStream.nullInputStream() , null , )
-                        // 2、使用imageProcessor 接口进行bilinear 放大
-//                        TensorImage bilinear_input = new TensorImage(DataType.UINT8);
-//                        bilinear_input.load(rgbBitmap);
-//                        bilinear_input = bilinear_processor.process(bilinear_input);
-//                        Bitmap dst = bilinear_input.getBitmap();
-                        end_time = System.currentTimeMillis();
-                        cost_time = end_time - start_time;
-                        Log.i(time_tag , "bilinear time: " + cost_time + " ms");
-//                        int dst_width = dst.getWidth();
-//                        int dst_height = dst.getHeight();
-//                        Log.i("MyNativeCode", "dst: width :" + dst_width + " height:  " + dst_height);
+//                        Bitmap dst = Bitmap.createScaledBitmap(rgbBitmap, video_output_shape.getWidth(),video_output_shape.getHeight() , true);
+//                        end_time = System.currentTimeMillis();
+//                        cost_time = end_time - start_time;
+//                        Log.i(time_tag , "bilinear time: " + cost_time + " ms");
                         // 存放到biSROutputQueue中
                         try {
-//                            biSROutputQueue.put(rgbBitmap);
-                            biSROutputQueue.put(dst);
+                            biSROutputQueue.put(rgbBitmap);
+//                            biSROutputQueue.put(dst);
 //                            biSROutputQueue.put(model_input_bitmap);
                             Log.i(mytag, "bisroutputqueue size: " + biSROutputQueue.size());
                         } catch (InterruptedException e) {
@@ -509,6 +507,10 @@ public class MainActivity extends AppCompatActivity {
                         renderer.set_bi_Bitmap(outBitmap);
                         renderer.set_sr_bitmap(srBitmap);
                         renderer.updateSurface_Flag = true;
+                        mGLSurfaceView.requestRender();
+
+//                        renderer.readBufferPixelToBitmap(3840,2160);
+//                        Context.getExternalFilesDir();
                         start_time = System.currentTimeMillis();
 //                        int bitmapWidth = outBitmap.getWidth();
 //                        int bitmapHeight = outBitmap.getHeight();
@@ -532,7 +534,7 @@ public class MainActivity extends AppCompatActivity {
                             matrix.postRotate( 0);
                         }
 //                        Bitmap postTransformImageBitmap = Bitmap.createBitmap(outBitmap, 0, 0, video_output_shape.getWidth(), video_output_shape.getHeight(), matrix, false);
-                        Bitmap postTransformImageBitmap = Bitmap.createBitmap(outBitmap, 0, 0, outBitmap.getWidth(),outBitmap.getHeight(), matrix, false);
+//                        Bitmap postTransformImageBitmap = Bitmap.createBitmap(outBitmap, 0, 0, outBitmap.getWidth(),outBitmap.getHeight(), matrix, false);
 
                         // 使用创建的 Handler 对象，将一个任务（更新 ImageView 的图像）发送到主线程执行。
                         // tips：在 Android 中，所有的 UI 操作必须在主线程（UI 线程）上进行。如果你在后台线程（如异步任务或网络操作线程）上尝试更新 UI，会导致应用崩溃。这是因为 Android 的 UI 组件不是线程安全的。

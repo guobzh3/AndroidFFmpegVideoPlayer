@@ -4,12 +4,15 @@
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
-<!--    使用opengl-->
-    <uses-feature android:glEsVersion="0x00030000" android:required="true" />
+<!--    获取写外部权限-->
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"/>
+    <!--    使用opengl-->
+<!--    <uses-feature android:glEsVersion="0x00030000" android:required="true" />-->
+<!--  本来是在application中的：  android:dataExtractionRules="@xml/data_extraction_rules"-->
 
+    <uses-feature android:glEsVersion="0x00020000" android:required="true" />
     <application
         android:allowBackup="true"
-        android:dataExtractionRules="@xml/data_extraction_rules"
         android:fullBackupContent="@xml/backup_rules"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
@@ -17,6 +20,7 @@
         android:supportsRtl="true"
         android:largeHeap="true"
         android:theme="@style/Theme.FfmpegVideoPlayer"
+        android:requestLegacyExternalStorage="true"
         tools:targetApi="31">
         <activity
             android:name=".MainActivity"

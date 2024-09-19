@@ -4,17 +4,19 @@ plugins {
 
 android {
     namespace = "com.example.ffmpegvideoplayer"
-    compileSdk = 34
+    //noinspection GradleDependency
+    compileSdk = 29
 
     defaultConfig {
         applicationId = "com.example.ffmpegvideoplayer"
         minSdk = 26
-        targetSdk = 34
+        //noinspection ExpiredTargetSdkVersion
+        targetSdk = 29
         versionCode = 1
         versionName = "1.0"
 //        加入renderscript 相关的依赖项目
-//        renderscriptTargetApi = 24
-//        renderscriptSupportModeEnabled = true
+        renderscriptTargetApi = 24
+        renderscriptSupportModeEnabled = true
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         externalNativeBuild {
             cmake {

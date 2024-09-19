@@ -22,7 +22,7 @@ player.start();
 ## 模型推理
 这里以超分增强模型为例，模型推理这块放在Java中实现，使用
 ```Java
-BlockingQueue<int[]> rgbBytesQueue = new ArrayBlockingQueue<>(QUEUE_CAPACITY)
+BlockingQueue<int[]> rgbBytesQueue = new ArrayBlockingQueue<>(QUEUE_CAPACITY);
 ```
 作为通信，C++代码中将得到的avFrame视频帧数据转换为int*的数组后放入调用Java中的接口，将数据放入该队列中，Java中代码从该队列中读数据进行增强处理
 

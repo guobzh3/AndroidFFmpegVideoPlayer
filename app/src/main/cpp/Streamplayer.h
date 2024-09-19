@@ -35,6 +35,10 @@ public:
     int video_index;
     int frame_decoded_count;
 
+    // multithread yuv2rgb
+    int thread_num;
+    std::vector<std::thread> process_thread;
+
     StreamPlayer(JavaVM* javaVM, jstring url) {
         // javaVM ： java线程的句柄
         // 要在jni代码的线程中调用java代码的方法，必须把当前线程连接到VM中，获取到一个[JNIEnv*].
@@ -64,6 +68,10 @@ public:
         this->frame_decoded_count = 0;
         this->deFormatc = createFormatc(url); // 用于读取packet av_read_frame(this->deFormatc, input_packet);
         this->deCodecc = createCodecc(this->deFormatc); // 用于对packet进行解码，avcodec_send_packet(this->deCodecc, received_packet); avcodec_receive_frame(this->deCodecc, input_frame);
+
+        // multithread yuv2rgb
+        this->thread_num = 8;
+        this->process_thread = std::vector<std::thread>(this->thread_num);
     }
 
     AVFormatContext* createFormatc(jstring url) {
@@ -248,12 +256,12 @@ public:
         }
         auto startTime = std::chrono::high_resolution_clock::now();
         // process
-//        int thread_num = 2;
-//        std::vector<std::thread> process_thread(thread_num);
+//        int thread_num = this->thread_num;
 //        for (int th = 0; th < thread_num; th++) {
 //            process_thread[th] = std::thread(
-//                        [&frame, &outData, width, height, th, thread_num]() {
+//                        [&frame, &outData, width, height, th, this]() {
 //                            LOGI( "decode thread :%d ",th );
+//                            auto threadstarttime = std::chrono::high_resolution_clock::now();
 //                            int yp = (height / thread_num) * width * th;
 //                            int endIn = th < (thread_num - 1) ? (height / thread_num) * th + (height / thread_num) : height;
 //                            for (int j = (height / thread_num) * th; j < endIn; j++) {
@@ -267,6 +275,9 @@ public:
 //                                    outData[yp++] = YUV2RGB(0xff & yData, 0xff & uData, 0xff & vData);
 //                                }
 //                            }
+//                            auto threadendtime = std::chrono::high_resolution_clock::now();
+//                            auto threadduration = std::chrono::duration_cast<std::chrono::milliseconds>(threadendtime - threadstarttime);
+//                            LOGI("threadduration cost Time = %f ms", (double)(threadduration.count()) );
 //                        }
 //                    );
 //        }
@@ -321,10 +332,13 @@ public:
                 outData[yp++] = YUV2RGB(0xff & yData, 0xff & uData, 0xff & vData); // 转化为RGB
             }
         }
+//        std::memcpy(outData, frame->data[0], frame->width * frame->height);
+//        std::memcpy(outData + frame->width * frame->height, frame->data[1], frame->width * frame->height / 4);
+//        std::memcpy(outData + frame->width * frame->height + frame->width * frame->height / 4, frame->data[2], frame->width * frame->height / 4);
 
         auto endTime = std::chrono::high_resolution_clock::now();
         auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime);
-        LOGI("avFrameYUV420ToARGB8888 cost Time = %f ms", (double)(duration.count()) );
+        LOGI("avFrameYUV420ToARGB8888 cost Time = %f ms", (double)(duration.count()));
         // 释放c++中的数组元素，并同步回java层
         env->ReleaseIntArrayElements(outFrame, outData, 0);
         // 调用外部的java函数，将解码得到的数据存放到了队列中；其他的线程检测到这个队列中有数据了，就可以获取数据并进行推理了

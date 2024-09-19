@@ -16,13 +16,15 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 //import android.renderscript.ScriptIntrinsicResize;
+import android.renderscript.ScriptIntrinsicResize;
+import android.renderscript.ScriptIntrinsicYuvToRGB;
 import android.util.Log;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
 import android.widget.ImageView;
 import android.widget.TextView;
 
-import androidx.activity.EdgeToEdge;
+//import androidx.activity.EdgeToEdge;
 import androidx.annotation.NonNull;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.graphics.Insets;
@@ -42,12 +44,12 @@ import org.tensorflow.lite.support.image.ops.ResizeOp;
 import org.tensorflow.lite.support.tensorbuffer.TensorBuffer;
 
 // renderscript 相关
-//import android.content.Context;
-//import android.graphics.Bitmap;
-//import android.renderscript.Allocation;
-//import android.renderscript.Element;
-//import android.renderscript.RenderScript;
-//import android.renderscript.ScriptC;
+import android.content.Context;
+import android.graphics.Bitmap;
+import android.renderscript.Allocation;
+import android.renderscript.Element;
+import android.renderscript.RenderScript;
+import android.renderscript.ScriptC;
 
 import android.opengl.GLES31;
 import android.opengl.GLSurfaceView;
@@ -73,12 +75,13 @@ public class MainActivity extends AppCompatActivity {
     // width, height
     // 270p -> 540P
     private final Size video_output_shape = new Size(3840, 2160);
-    private static int[] video_input_shape = new int[] {960, 540};
-    private static int[] tf_input_shape = new int[] {480,270};
-    private static int[] tf_output_shape = new int[] {1920,1080};
+    private static int[] video_input_shape = new int[] {1920, 1080};
+    private static int[] tf_input_shape = new int[] {480, 270};
+    private static int[] tf_output_shape = new int[] {960, 540};
 
     private static  int[] tile_index = new int[] {1,1};
-    private static int[] tile_split = new int[] {video_input_shape[0] / 2 , video_input_shape[1] / 2}; // width ， height
+//    private static int[] tile_split = new int[] {video_input_shape[0] / 2 , video_input_shape[1] / 2}; // width ， height
+    private static int[] tile_split = new int[] {video_input_shape[0] / 4 , video_input_shape[1] / 4};
 //    private static int[] video_input_shape = new int[] {480, 270};
 //    private final Size video_output_shape = new Size(960, 540);
 
@@ -104,6 +107,21 @@ public class MainActivity extends AppCompatActivity {
     private MyRenderer renderer;
     Bitmap inputBitmap;
     Bitmap outputBitmap;
+
+    // renderscript for bi
+    RenderScript mRs;
+    Allocation inAlloc;
+    Allocation outAlloc;
+    ScriptIntrinsicResize siResize;
+
+    // renderscript for yuv2rgb
+    RenderScript mRsyuv2rgb;
+    Allocation inAllocyuv2rgb;
+    Allocation outAllocyuv2rgb;
+    ScriptIntrinsicYuvToRGB siyuv2rgb;
+
+    // tf
+    Bitmap model_input_bitmap;
 
     ImageProcessor imageProcessor , bilinear_processor;
 //    public Bitmap applyBlur(Context context, Bitmap inputBitmap, float blurRadius) {
@@ -155,7 +173,7 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        EdgeToEdge.enable(this); // 启用一个无边框的沉浸式布局
+//        EdgeToEdge.enable(this); // 启用一个无边框的沉浸式布局
 
         // 初始化GLSurfaceView
         mGLSurfaceView = new GLSurfaceView(this);
@@ -171,8 +189,8 @@ public class MainActivity extends AppCompatActivity {
             // Set the renderer to our demo renderer, defined below.
             // 我只需要修改这个setrenderer就可以展示我自己设计的renderer了 ！yes！
 //			mGLSurfaceView.setRenderer(new LessonFourRenderer(this));
-            renderer = new MyRenderer(this);
-            mGLSurfaceView.setRenderer(renderer);
+//            renderer = new MyRenderer(this);
+//            mGLSurfaceView.setRenderer(renderer);
             Log.i("gles","support GLES");
         }
         else{
@@ -180,13 +198,13 @@ public class MainActivity extends AppCompatActivity {
             return ;
         }
 
-        setContentView(mGLSurfaceView);
+//        setContentView(mGLSurfaceView);
 
-//        setContentView(R.layout.activity_main);
-        // params
-//        surfaceView = findViewById(R.id.surfaceView);
-//        surfaceHolder = surfaceView.getHolder(); //获取对低层surface的访问
-//        imageView = findViewById(R.id.imageView);
+        setContentView(R.layout.activity_main);
+//         params
+        surfaceView = findViewById(R.id.surfaceView);
+        surfaceHolder = surfaceView.getHolder(); //获取对低层surface的访问
+        imageView = findViewById(R.id.imageView);
         /**
          * 用于线程管理：
              * Looper 是一个循环，负责管理和分发线程中的消息和任务队列。
@@ -199,6 +217,21 @@ public class MainActivity extends AppCompatActivity {
         outPixels = new int [video_output_shape.getHeight() * video_output_shape.getWidth()];
         inputBitmap = Bitmap.createBitmap(video_input_shape[0], video_input_shape[1], Bitmap.Config.ARGB_8888); // 输入的图片(先宽后高）
         outputBitmap = Bitmap.createBitmap(video_output_shape.getWidth(), video_output_shape.getHeight(), Bitmap.Config.ARGB_8888); // 输出的图片
+
+        // renderscript for bi init
+        mRs = RenderScript.create(getApplication());
+        inAlloc = Allocation.createFromBitmap(mRs, inputBitmap);
+        outAlloc = Allocation.createFromBitmap(mRs, outputBitmap);
+        siResize = ScriptIntrinsicResize.create(mRs);
+
+        // renderscript for yuv2rgb init
+        mRsyuv2rgb = RenderScript.create(getApplication());
+        inAllocyuv2rgb = Allocation.createFromBitmap(mRsyuv2rgb, inputBitmap);
+        outAllocyuv2rgb = Allocation.createFromBitmap(mRsyuv2rgb, outputBitmap);
+        siyuv2rgb = ScriptIntrinsicYuvToRGB.create(mRsyuv2rgb, Element.RGBA_8888(mRsyuv2rgb));
+
+        // tf
+        model_input_bitmap = Bitmap.createBitmap(tf_input_shape[0] , tf_input_shape[1] , Bitmap.Config.ARGB_8888);
 
         // 出初始化对图像进行预处理的类
         imageProcessor = new ImageProcessor.Builder()
@@ -316,11 +349,15 @@ public class MainActivity extends AppCompatActivity {
                 while (true) {
                     try {
                         long start_time , end_time , cost_time;
-                        start_time = System.currentTimeMillis();
                         int[] rgbData = rgbBytesQueue.take(); // 把RGB数据拿出来
                         // 进行预处理
+//                        inAllocyuv2rgb.copyFrom(yuvData);
+//                        siyuv2rgb.setInput(inAllocyuv2rgb);
+//                        siyuv2rgb.forEach(outAllocyuv2rgb);
+//                        outAllocyuv2rgb.copyTo(inputBitmap);
                         // 只提取 480 * 270 的部分来构建modelInput
                         // 验证了，这部分是没问题的
+                        start_time = System.currentTimeMillis();
                         int[] model_input = new int[tf_input_shape[0] * tf_input_shape[1]];
 
                         int w_start = tile_index[0] * tf_input_shape[0];
@@ -338,7 +375,7 @@ public class MainActivity extends AppCompatActivity {
 
                             }
                         }
-                        Bitmap model_input_bitmap= Bitmap.createBitmap(tf_input_shape[0] , tf_input_shape[1] , Bitmap.Config.ARGB_8888);
+
                         model_input_bitmap.setPixels(model_input , 0 , tf_input_shape[0],0,0,tf_input_shape[0],tf_input_shape[1]);
                         end_time = System.currentTimeMillis();
                         // TODO: 接着写
@@ -355,17 +392,19 @@ public class MainActivity extends AppCompatActivity {
                         }
                         // TODO：对剩下的数据进行bi放大，并放到bioutputQueue中
                         // 初始化bitmap并放大bitmap中
-                        Bitmap rgbBitmap = Bitmap.createBitmap(video_input_shape[0], video_input_shape[1], Bitmap.Config.ARGB_8888);
-                        rgbBitmap.setPixels(rgbData, 0, video_input_shape[0],  0,  0, video_input_shape[0], video_input_shape[1]);
+
+                        inputBitmap.setPixels(rgbData, 0, video_input_shape[0],  0,  0, video_input_shape[0], video_input_shape[1]);
 //                        BitmapFactory.de
                         start_time = System.currentTimeMillis();
                         // 1. 使用Bitmap.createScaledBitmap 接口进行bilinear放大
-                        Bitmap dst = Bitmap.createScaledBitmap(rgbBitmap, video_output_shape.getWidth(),video_output_shape.getHeight() , true);
+//                        Bitmap dst = Bitmap.createScaledBitmap(rgbBitmap, video_output_shape.getWidth(), video_output_shape.getHeight(), true);
                         // 尝试使用GPU进行bilinear
-//                        BitmapFactory.Options options;
-//                        ScriptIntrinsicResize resizeScript = ScriptIntrinsicResize.create(rs);
-//                        options.inPreferredConfig = Bitmap.Config.HARDWARE;
-//                        BitmapFactory.decodeStream(InputStream.nullInputStream() , null , )
+
+//                        Bitmap dst = Bitmap.createBitmap(video_output_shape.getWidth(), video_output_shape.getHeight(), inputBitmap.getConfig());
+                        // renderscript run
+                        siResize.setInput(inAlloc);
+                        siResize.forEach_bicubic(outAlloc);
+                        outAlloc.copyTo(outputBitmap);
                         // 2、使用imageProcessor 接口进行bilinear 放大
 //                        TensorImage bilinear_input = new TensorImage(DataType.UINT8);
 //                        bilinear_input.load(rgbBitmap);
@@ -380,7 +419,7 @@ public class MainActivity extends AppCompatActivity {
                         // 存放到biSROutputQueue中
                         try {
 //                            biSROutputQueue.put(rgbBitmap);
-                            biSROutputQueue.put(dst);
+                            biSROutputQueue.put(outputBitmap);
 //                            biSROutputQueue.put(model_input_bitmap);
                             Log.i(mytag, "bisroutputqueue size: " + biSROutputQueue.size());
                         } catch (InterruptedException e) {
@@ -498,25 +537,25 @@ public class MainActivity extends AppCompatActivity {
                                 outPixels[yp++] = 0xff000000 | (r << 16 & 0xff0000) | (g << 8 & 0xff00) | (b & 0xff);
                             }
                         }
-                        Bitmap srBitmap = Bitmap.createBitmap(tf_output_shape[1],tf_output_shape[0], Bitmap.Config.ARGB_8888);
-                        srBitmap.setPixels(outPixels,0,tf_output_shape[1],0,0,tf_output_shape[1],tf_output_shape[0]);
+//                        Bitmap srBitmap = Bitmap.createBitmap(tf_output_shape[1],tf_output_shape[0], Bitmap.Config.ARGB_8888);
+//                        srBitmap.setPixels(outPixels,0,tf_output_shape[1],0,0,tf_output_shape[1],tf_output_shape[0]);
 
                         end_time = System.currentTimeMillis();
                         cost_time = end_time - start_time;
                         Log.i(time_tag , "inference post_process time: " + cost_time + " ms");
                         // TODO：从bisr队列中获取bi放大的bitmap，然后将outPixels填充到对应的位置中（不知道能不能直接填充）
                         Bitmap outBitmap = biSROutputQueue.take();
-                        renderer.set_bi_Bitmap(outBitmap);
-                        renderer.set_sr_bitmap(srBitmap);
-                        renderer.updateSurface_Flag = true;
+//                        renderer.set_bi_Bitmap(outBitmap);
+//                        renderer.set_sr_bitmap(srBitmap);
+//                        renderer.updateSurface_Flag = true;
                         start_time = System.currentTimeMillis();
-//                        int bitmapWidth = outBitmap.getWidth();
-//                        int bitmapHeight = outBitmap.getHeight();
+                        int bitmapWidth = outBitmap.getWidth();
+                        int bitmapHeight = outBitmap.getHeight();
 //                        Log.i(mytag, "run: " + bitmapWidth +  ' ' + bitmapHeight); // 3840 2160
 //                        Log.i(mytag , "x: "+tile_index[0] * tf_output_shape[0] + " width: "+tf_output_shape[0] + " bitmap_width: "+ outBitmap.getWidth());
                         // stride 要填写要填入的patch的width值
                         // 这句话是把sr patch拷贝到outBitmap对应的位置，暂时注释掉
-//                        outBitmap.setPixels(outPixels , 0 , tf_output_shape[0] , tile_index[0] * tf_output_shape[0]  , tile_index[1] * tf_output_shape[1]  , tf_output_shape[0] , tf_output_shape[1]);
+                        outBitmap.setPixels(outPixels , 0 , tf_output_shape[0] , tile_index[0] * tf_output_shape[0]  , tile_index[1] * tf_output_shape[1]  , tf_output_shape[0] , tf_output_shape[1]);
 //                        outBitmap.setPixels(outPixels , 0 , tf_output_shape[0] , tile_index[0] * tf_output_shape[0] , tile_index[1] * tf_output_shape[1] , tf_output_shape[0] , tf_output_shape[1]);
 
                      // 这里有问题-> 单独把这部分的东西显示出来看看（这里推理完是没错的，应该就是setpixels的问题 ）
@@ -532,17 +571,18 @@ public class MainActivity extends AppCompatActivity {
                             matrix.postRotate( 0);
                         }
 //                        Bitmap postTransformImageBitmap = Bitmap.createBitmap(outBitmap, 0, 0, video_output_shape.getWidth(), video_output_shape.getHeight(), matrix, false);
-                        Bitmap postTransformImageBitmap = Bitmap.createBitmap(outBitmap, 0, 0, outBitmap.getWidth(),outBitmap.getHeight(), matrix, false);
+//                        Bitmap postTransformImageBitmap = Bitmap.createBitmap(outBitmap, 0, 0, outBitmap.getWidth(),outBitmap.getHeight(), matrix, false);
 
                         // 使用创建的 Handler 对象，将一个任务（更新 ImageView 的图像）发送到主线程执行。
                         // tips：在 Android 中，所有的 UI 操作必须在主线程（UI 线程）上进行。如果你在后台线程（如异步任务或网络操作线程）上尝试更新 UI，会导致应用崩溃。这是因为 Android 的 UI 组件不是线程安全的。
                         // 只有主线程可以更新视图
-//                        handler.post(()-> imageView.setImageBitmap(postTransformImageBitmap));
+                        handler.post(()-> imageView.setImageBitmap(outBitmap));
+//                        handler.post(()-> surfaceView.s .setImageBitmap(postTransformImageBitmap));
                         end_time = System.currentTimeMillis();
                         cost_time = end_time - start_time;
 //                        long endTime = System.currentTimeMillis();
 //                        long costTime = endTime - startTime;
-//                        updateTextView(Long.toString(cost_time) + "ms");
+                        updateTextView(Long.toString(cost_time) + "ms");
                         Log.i(time_tag, "concat and show time : " + cost_time + " ms");
                     }
                     catch (InterruptedException e) {

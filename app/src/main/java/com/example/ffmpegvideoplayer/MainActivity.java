@@ -12,13 +12,19 @@ import android.graphics.BitmapShader;
 import android.graphics.Shader;
 import android.graphics.RectF;
 import android.graphics.Rect;
+import android.graphics.SurfaceTexture;
+import android.hardware.Camera;
+import android.opengl.GLES11Ext;
+import android.opengl.GLUtils;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 //import android.renderscript.ScriptIntrinsicResize;
+import android.util.DisplayMetrics;
 import android.util.Log;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
+import android.view.TextureView;
 import android.widget.ImageView;
 import android.widget.TextView;
 
@@ -49,10 +55,23 @@ import org.tensorflow.lite.support.tensorbuffer.TensorBuffer;
 //import android.renderscript.RenderScript;
 //import android.renderscript.ScriptC;
 
+// opengl相关
 import android.opengl.GLES31;
 import android.opengl.GLSurfaceView;
 import android.opengl.GLES20;
+import javax.microedition.khronos.opengles.GL10;
 
+// TextureView相关
+import android.app.Activity;
+import android.content.pm.ActivityInfo;
+import android.graphics.SurfaceTexture;
+import android.hardware.Camera;
+import android.os.Bundle;
+import android.util.DisplayMetrics;
+import android.view.TextureView;
+import android.view.Window;
+import android.view.WindowManager;
+import com.example.ffmpegvideoplayer.MyGLRenderer;
 
 public class MainActivity extends AppCompatActivity {
 
@@ -137,7 +156,74 @@ public class MainActivity extends AppCompatActivity {
 //
 //        return outputBitmap;
 //    }
+    /*
+    TextureView 相关部分
+     */
+    private static final String TAG = "Filter_TVActivity";
+    private TextureView mTextureView;
+    private SurfaceTexture mOESSurfaceTexture;
+    private int mOESTextureId_1 = -1;
+    private int mOESTextureId_2 = -1;
+    private MyGLRenderer mRenderer;
 
+    // 创建一个外部纹理
+    public static int createOESTextureObject() {
+        int[] tex = new int[1];
+        GLES20.glGenTextures(1, tex, 0);
+        GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, tex[0]);
+        GLES20.glTexParameterf(GLES11Ext.GL_TEXTURE_EXTERNAL_OES,
+                GL10.GL_TEXTURE_MIN_FILTER, GL10.GL_NEAREST);
+        GLES20.glTexParameterf(GLES11Ext.GL_TEXTURE_EXTERNAL_OES,
+                GL10.GL_TEXTURE_MAG_FILTER, GL10.GL_LINEAR);
+        GLES20.glTexParameterf(GLES11Ext.GL_TEXTURE_EXTERNAL_OES,
+                GL10.GL_TEXTURE_WRAP_S, GL10.GL_CLAMP_TO_EDGE);
+        GLES20.glTexParameterf(GLES11Ext.GL_TEXTURE_EXTERNAL_OES,
+                GL10.GL_TEXTURE_WRAP_T, GL10.GL_CLAMP_TO_EDGE);
+        GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, 0);
+        return tex[0];
+    }
+
+    public static int createTexture2DObject() {
+        int[] tex = new int[1];
+        GLES20.glGenTextures(1, tex, 0);
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, tex[0]);
+        GLES20.glTexParameterf(GLES20.GL_TEXTURE_2D,
+                GL10.GL_TEXTURE_MIN_FILTER, GL10.GL_NEAREST);
+        GLES20.glTexParameterf(GLES20.GL_TEXTURE_2D,
+                GL10.GL_TEXTURE_MAG_FILTER, GL10.GL_LINEAR);
+        GLES20.glTexParameterf(GLES20.GL_TEXTURE_2D,
+                GL10.GL_TEXTURE_WRAP_S, GL10.GL_CLAMP_TO_EDGE);
+        GLES20.glTexParameterf(GLES20.GL_TEXTURE_2D,
+                GL10.GL_TEXTURE_WRAP_T, GL10.GL_CLAMP_TO_EDGE);
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
+        return tex[0];
+    }
+
+    public TextureView.SurfaceTextureListener mTextureListener = new TextureView.SurfaceTextureListener() {
+        @Override
+        public void onSurfaceTextureAvailable(SurfaceTexture surface, int width, int height) {
+            mOESTextureId_1 = createTexture2DObject(); // 创建了一个OES纹理对象
+            mOESTextureId_2 = createTexture2DObject();
+            mRenderer.init(mTextureView, mOESTextureId_1,mOESTextureId_2, MainActivity.this); // 初始化
+            mOESSurfaceTexture = mRenderer.initOESTexture(); //这里会先创建一个SurfaceTexture，然后跟一个external_texture_ID绑定，并返回这个surfaceTexture
+
+            // 设置SurfaceTexture
+        }
+
+        @Override
+        public void onSurfaceTextureSizeChanged(SurfaceTexture surface, int width, int height) {
+        }
+
+        @Override
+        public boolean onSurfaceTextureDestroyed(SurfaceTexture surface) {
+            return true;
+        }
+
+        @Override
+        public void onSurfaceTextureUpdated(SurfaceTexture surface) {
+        }
+
+    };
     private void initModel() {
         Log.i("dada","initModel. ispico : " + (this.isPICO));
 
@@ -166,7 +252,7 @@ public class MainActivity extends AppCompatActivity {
 //        EdgeToEdge.enable(this); // 启用一个无边框的沉浸式布局
 
         // 初始化GLSurfaceView
-        mGLSurfaceView = new GLSurfaceView(this);
+//        mGLSurfaceView = new GLSurfaceView(this);
         final ActivityManager activityManager = (ActivityManager) getSystemService(Context.ACTIVITY_SERVICE);
         final ConfigurationInfo configurationInfo = activityManager.getDeviceConfigurationInfo();
         final boolean supportsEs2 = configurationInfo.reqGlEsVersion >= 0x20000;
@@ -174,22 +260,35 @@ public class MainActivity extends AppCompatActivity {
         if (supportsEs2)
         {
             // Request an OpenGL ES 2.0 compatible context.
-            mGLSurfaceView.setEGLContextClientVersion(2);
+//            mGLSurfaceView.setEGLContextClientVersion(2);
 
             // Set the renderer to our demo renderer, defined below.
             // 我只需要修改这个setrenderer就可以展示我自己设计的renderer了 ！yes！
 //			mGLSurfaceView.setRenderer(new LessonFourRenderer(this));
-            renderer = new MyRenderer(this);
-            mGLSurfaceView.setRenderer(renderer);
-            mGLSurfaceView.setRenderMode(GLSurfaceView.RENDERMODE_WHEN_DIRTY);
+//            renderer = new MyRenderer(this);
+//            mGLSurfaceView.setRenderer(renderer);
+//            mGLSurfaceView.setRenderMode(GLSurfaceView.RENDERMODE_WHEN_DIRTY);
             Log.i("gles","support GLES");
         }
         else{
             Log.e("gles","not support GLES");
             return ;
         }
+
+        // TextureView 相关部分：
+        //设置全屏无状态栏，并竖屏显示
+        getWindow().setFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN, WindowManager.LayoutParams.FLAG_FULLSCREEN);
+        requestWindowFeature(Window.FEATURE_NO_TITLE);
+        setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_PORTRAIT);
+
+        mTextureView = new TextureView(this);
+        mTextureView.setSurfaceTextureListener(mTextureListener);
+        //设置隐藏虚拟按键
+        //mTextureView.setSystemUiVisibility(View.SYSTEM_UI_FLAG_HIDE_NAVIGATION);
+        mRenderer = new MyGLRenderer();
+        setContentView(mTextureView);
 //        LinearLayout layout = findViewById(R.id.layout);
-        setContentView(mGLSurfaceView);
+//        setContentView(mGLSurfaceView);
 
 //        setContentView(R.layout.activity_main);
 //        glsurfacebview = findViewById(R.id.glsurfaceview);
@@ -266,6 +365,7 @@ public class MainActivity extends AppCompatActivity {
                         long startTime = System.currentTimeMillis();
                         int [] rgbData = rgbBytesQueue.take();
                         Bitmap rgbBitmap = Bitmap.createBitmap(video_input_shape[0], video_input_shape[1], Bitmap.Config.ARGB_8888);
+//                        Bitmap.Config.RGBA_F16
                         // 用rgbData中的数据来填充这个bitmap
                         rgbBitmap.setPixels(rgbData, 0, video_input_shape[0], 0, 0, video_input_shape[0], video_input_shape[1]);
                         Matrix matrix = new Matrix();
@@ -504,10 +604,13 @@ public class MainActivity extends AppCompatActivity {
                         Log.i(time_tag , "inference post_process time: " + cost_time + " ms");
                         // TODO：从bisr队列中获取bi放大的bitmap，然后将outPixels填充到对应的位置中（不知道能不能直接填充）
                         Bitmap outBitmap = biSROutputQueue.take();
-                        renderer.set_bi_Bitmap(outBitmap);
-                        renderer.set_sr_bitmap(srBitmap);
-                        renderer.updateSurface_Flag = true;
-                        mGLSurfaceView.requestRender();
+//                        GLUtils.texImage2D();
+//                        renderer.set_bi_Bitmap(outBitmap);
+//                        renderer.set_sr_bitmap(srBitmap);
+                        mRenderer.set_bi_texture(outBitmap);
+                        mRenderer.set_sr_texture(srBitmap);
+//                        renderer.updateSurface_Flag = true;
+//                        mGLSurfaceView.requestRender();
 
 //                        renderer.readBufferPixelToBitmap(3840,2160);
 //                        Context.getExternalFilesDir();

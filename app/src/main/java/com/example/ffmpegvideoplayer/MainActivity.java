@@ -5,6 +5,7 @@ import android.content.Context;
 import android.content.pm.ConfigurationInfo;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
+import android.graphics.ImageFormat;
 import android.graphics.Matrix;
 import android.graphics.Canvas;
 import android.graphics.Paint;
@@ -18,6 +19,7 @@ import android.os.Looper;
 //import android.renderscript.ScriptIntrinsicResize;
 import android.renderscript.ScriptIntrinsicResize;
 import android.renderscript.ScriptIntrinsicYuvToRGB;
+import android.renderscript.Type;
 import android.util.Log;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
@@ -58,13 +60,13 @@ import android.opengl.GLES20;
 
 public class MainActivity extends AppCompatActivity {
 
-    private static final int QUEUE_CAPACITY = 32;
+    private static final int QUEUE_CAPACITY = 16;
     // 这个队列不能开太大，如果是 540P的图像数据的话，一个int[540*960]大小大概为2MB
     // 当时设置队列为4096的话程序运行一段时间就炸，因为内存爆了，当程序运行内存超过700MB以后就会Out of memory
     // 所以要设小点
     // BlockingQueue：线程安全的阻塞队列
     // 通过队列来构建流水线
-    private static BlockingQueue<int[]> rgbBytesQueue = new ArrayBlockingQueue<>(QUEUE_CAPACITY);
+    private static BlockingQueue<byte[]> yuvBytesQueue = new ArrayBlockingQueue<>(QUEUE_CAPACITY);
     private static BlockingQueue<TensorImage> modelInputQueue = new ArrayBlockingQueue<>(QUEUE_CAPACITY);
     private static BlockingQueue<TensorBuffer> modelOutputQueue = new ArrayBlockingQueue<>(16);
     private static BlockingQueue<int[]> viewOutQueue = new ArrayBlockingQueue<>(QUEUE_CAPACITY);
@@ -75,13 +77,13 @@ public class MainActivity extends AppCompatActivity {
     // width, height
     // 270p -> 540P
     private final Size video_output_shape = new Size(3840, 2160);
-    private static int[] video_input_shape = new int[] {1920, 1080};
+    private static int[] video_input_shape = new int[] {960, 540};
     private static int[] tf_input_shape = new int[] {480, 270};
-    private static int[] tf_output_shape = new int[] {960, 540};
+    private static int[] tf_output_shape = new int[] {1920, 1080};
 
     private static  int[] tile_index = new int[] {1,1};
-//    private static int[] tile_split = new int[] {video_input_shape[0] / 2 , video_input_shape[1] / 2}; // width ， height
-    private static int[] tile_split = new int[] {video_input_shape[0] / 4 , video_input_shape[1] / 4};
+    private static int[] tile_split = new int[] {video_input_shape[0] / 2 , video_input_shape[1] / 2}; // width ， height
+//    private static int[] tile_split = new int[] {video_input_shape[0] / 4 , video_input_shape[1] / 4};
 //    private static int[] video_input_shape = new int[] {480, 270};
 //    private final Size video_output_shape = new Size(960, 540);
 
@@ -119,6 +121,7 @@ public class MainActivity extends AppCompatActivity {
     Allocation inAllocyuv2rgb;
     Allocation outAllocyuv2rgb;
     ScriptIntrinsicYuvToRGB siyuv2rgb;
+    byte[] outBytes;
 
     // tf
     Bitmap model_input_bitmap;
@@ -226,9 +229,14 @@ public class MainActivity extends AppCompatActivity {
 
         // renderscript for yuv2rgb init
         mRsyuv2rgb = RenderScript.create(getApplication());
-        inAllocyuv2rgb = Allocation.createFromBitmap(mRsyuv2rgb, inputBitmap);
-        outAllocyuv2rgb = Allocation.createFromBitmap(mRsyuv2rgb, outputBitmap);
+//        inAllocyuv2rgb = Allocation.createFromBitmap(mRsyuv2rgb, inputBitmap);
+//        outAllocyuv2rgb = Allocation.createFromBitmap(mRsyuv2rgb, outputBitmap);
+        Type.Builder yuvType = new Type.Builder(mRsyuv2rgb, Element.U8(mRsyuv2rgb)).setX(video_input_shape[0]).setY(video_input_shape[1]).setYuvFormat(ImageFormat.YV12);
+        inAllocyuv2rgb = Allocation.createTyped(mRsyuv2rgb, yuvType.create(), Allocation.USAGE_SCRIPT);
+        Type.Builder rgbaType = new Type.Builder(mRsyuv2rgb, Element.RGBA_8888(mRsyuv2rgb)).setX(video_input_shape[0]).setY(video_input_shape[1]);
+        outAllocyuv2rgb = Allocation.createTyped(mRsyuv2rgb, rgbaType.create(), Allocation.USAGE_SCRIPT);
         siyuv2rgb = ScriptIntrinsicYuvToRGB.create(mRsyuv2rgb, Element.RGBA_8888(mRsyuv2rgb));
+        outBytes = new byte[video_input_shape[0] * video_input_shape[1] * 4];
 
         // tf
         model_input_bitmap = Bitmap.createBitmap(tf_input_shape[0] , tf_input_shape[1] , Bitmap.Config.ARGB_8888);
@@ -279,54 +287,54 @@ public class MainActivity extends AppCompatActivity {
 //            }
 //        });
     }
-    public void ReceiveAndShow() {
-        new Thread(new Runnable() {
-            @Override
-            public void run() {
-                while (true) {
-                    try {
-                        long startTime = System.currentTimeMillis();
-                        int [] rgbData = rgbBytesQueue.take();
-                        Bitmap rgbBitmap = Bitmap.createBitmap(video_input_shape[0], video_input_shape[1], Bitmap.Config.ARGB_8888);
-                        // 用rgbData中的数据来填充这个bitmap
-                        rgbBitmap.setPixels(rgbData, 0, video_input_shape[0], 0, 0, video_input_shape[0], video_input_shape[1]);
-                        Matrix matrix = new Matrix();
-                        if (!isPICO) {
-                            matrix.postRotate(90);
-                        }
-                        Bitmap postTransformImageBitmap = Bitmap.createBitmap(rgbBitmap, 0, 0, video_input_shape[0], video_input_shape[1], matrix, false);
-                        int outHeight = video_input_shape[1];
-                        int outWidth = video_input_shape[0];
-                        if (isPICO) {
-                            outHeight = video_input_shape[0];
-                            outWidth = video_input_shape[1];
-                        }
-
-                        Canvas canvas = surfaceHolder.lockCanvas();
-                        if (canvas != null) {
-                            try{
-                                canvas.drawBitmap(postTransformImageBitmap, null, new Rect(0, 0, outHeight, outWidth), null);
-                            } finally {
-                                surfaceHolder.unlockCanvasAndPost(canvas);
-                            }
-                        }
-
-                        long endTime = System.currentTimeMillis();
-                        long costTime = endTime - startTime;
-//                        updateTextView(Long.toString(costTime) + "ms");
-                    } catch (InterruptedException e) {
-                        Log.e("Error Exception", "MainActivity error: " + e.getMessage() + e.toString());
-                        Thread.currentThread().interrupt();
-                        break;
-                    }
-                }
-            }
-        }).start();
-    }
+//    public void ReceiveAndShow() {
+//        new Thread(new Runnable() {
+//            @Override
+//            public void run() {
+//                while (true) {
+//                    try {
+//                        long startTime = System.currentTimeMillis();
+//                        byte[] rgbData = yuvBytesQueue.take();
+//                        Bitmap rgbBitmap = Bitmap.createBitmap(video_input_shape[0], video_input_shape[1], Bitmap.Config.ARGB_8888);
+//                        // 用rgbData中的数据来填充这个bitmap
+//                        rgbBitmap.setPixels(rgbData, 0, video_input_shape[0], 0, 0, video_input_shape[0], video_input_shape[1]);
+//                        Matrix matrix = new Matrix();
+//                        if (!isPICO) {
+//                            matrix.postRotate(90);
+//                        }
+//                        Bitmap postTransformImageBitmap = Bitmap.createBitmap(rgbBitmap, 0, 0, video_input_shape[0], video_input_shape[1], matrix, false);
+//                        int outHeight = video_input_shape[1];
+//                        int outWidth = video_input_shape[0];
+//                        if (isPICO) {
+//                            outHeight = video_input_shape[0];
+//                            outWidth = video_input_shape[1];
+//                        }
+//
+//                        Canvas canvas = surfaceHolder.lockCanvas();
+//                        if (canvas != null) {
+//                            try{
+//                                canvas.drawBitmap(postTransformImageBitmap, null, new Rect(0, 0, outHeight, outWidth), null);
+//                            } finally {
+//                                surfaceHolder.unlockCanvasAndPost(canvas);
+//                            }
+//                        }
+//
+//                        long endTime = System.currentTimeMillis();
+//                        long costTime = endTime - startTime;
+////                        updateTextView(Long.toString(costTime) + "ms");
+//                    } catch (InterruptedException e) {
+//                        Log.e("Error Exception", "MainActivity error: " + e.getMessage() + e.toString());
+//                        Thread.currentThread().interrupt();
+//                        break;
+//                    }
+//                }
+//            }
+//        }).start();
+//    }
 
     //tips: 学习多线程用队列进行流水线的写法
     public void mainProcess() {
-        // 从rgbBytesQueue 中 拿数据 转成 模型推理的格式，并且将数据放入到biSRQueue 中
+        // 从yuvBytesQueue 中 拿数据 转成 模型推理的格式，并且将数据放入到biSRQueue 中
         preProcess();
 
         // 从modelInputQueue 中 拿数据推理
@@ -349,34 +357,38 @@ public class MainActivity extends AppCompatActivity {
                 while (true) {
                     try {
                         long start_time , end_time , cost_time;
-                        int[] rgbData = rgbBytesQueue.take(); // 把RGB数据拿出来
+                        byte[] yuvData = yuvBytesQueue.take(); // 把YUV420数据拿出来
                         // 进行预处理
-//                        inAllocyuv2rgb.copyFrom(yuvData);
-//                        siyuv2rgb.setInput(inAllocyuv2rgb);
-//                        siyuv2rgb.forEach(outAllocyuv2rgb);
-//                        outAllocyuv2rgb.copyTo(inputBitmap);
+                        // 转RGBA
+                        start_time = System.currentTimeMillis();
+                        inAllocyuv2rgb.copyFrom(yuvData);
+                        siyuv2rgb.setInput(inAllocyuv2rgb);
+                        siyuv2rgb.forEach(outAllocyuv2rgb);
+                        outAllocyuv2rgb.copyTo(inputBitmap);
+                        end_time = System.currentTimeMillis();
+                        cost_time = end_time - start_time ;
+                        Log.i(time_tag , "yuv2rgb: " + cost_time + " ms");
                         // 只提取 480 * 270 的部分来构建modelInput
                         // 验证了，这部分是没问题的
                         start_time = System.currentTimeMillis();
-                        int[] model_input = new int[tf_input_shape[0] * tf_input_shape[1]];
+//                        int[] model_input = new int[tf_input_shape[0] * tf_input_shape[1]];
 
                         int w_start = tile_index[0] * tf_input_shape[0];
                         int h_start = tile_index[1] * tf_input_shape[1];
                         Log.i(mytag, "w_start " + w_start + " h_start " + h_start + " tf_input_shape[0] " + tf_input_shape[0] + " tf_input_shape[1] " + tf_input_shape[1] + " tile_split[0]" + tile_split[0] + " tile_split[1]" + tile_split[1]);
-                        int k = 0;
-                        for (int i = h_start;i < h_start + tile_split[1] ;i++){
-                            for (int j = w_start ; j < w_start + tile_split[0] ;j++){
-                                int index = i * video_input_shape[0] + j;
-                                model_input[k++] = rgbData[index];
-                                // 打印出来检查一下
-//                                if (j == w_start ){
-//                                    Log.i(mytag, "i=" + i + " j = " + j + " index =  " + index + " k =  " + k + " data: "+ rgbData[index]);
-//                                }
-
-                            }
-                        }
-
-                        model_input_bitmap.setPixels(model_input , 0 , tf_input_shape[0],0,0,tf_input_shape[0],tf_input_shape[1]);
+//                        int k = 0;
+//                        for (int i = h_start;i < h_start + tile_split[1] ;i++){
+//                            for (int j = w_start ; j < w_start + tile_split[0] ;j++){
+//                                int index = i * video_input_shape[0] + j;
+//                                model_input[k++] = rgbData[index];
+//                                // 打印出来检查一下
+////                                if (j == w_start ){
+////                                    Log.i(mytag, "i=" + i + " j = " + j + " index =  " + index + " k =  " + k + " data: "+ rgbData[index]);
+////                                }
+//                            }
+//                        }
+                        model_input_bitmap = Bitmap.createBitmap(inputBitmap, w_start, h_start, tf_input_shape[0], tf_input_shape[1]);
+//                        model_input_bitmap.setPixels(model_input , 0 , tf_input_shape[0],0,0,tf_input_shape[0],tf_input_shape[1]);
                         end_time = System.currentTimeMillis();
                         // TODO: 接着写
                         TensorImage modelInput = new TensorImage(DataType.FLOAT32);
@@ -393,7 +405,7 @@ public class MainActivity extends AppCompatActivity {
                         // TODO：对剩下的数据进行bi放大，并放到bioutputQueue中
                         // 初始化bitmap并放大bitmap中
 
-                        inputBitmap.setPixels(rgbData, 0, video_input_shape[0],  0,  0, video_input_shape[0], video_input_shape[1]);
+//                        inputBitmap.setPixels(rgbData, 0, video_input_shape[0],  0,  0, video_input_shape[0], video_input_shape[1]);
 //                        BitmapFactory.de
                         start_time = System.currentTimeMillis();
                         // 1. 使用Bitmap.createScaledBitmap 接口进行bilinear放大
@@ -635,95 +647,95 @@ public class MainActivity extends AppCompatActivity {
             }
         }).start();
     }
-    public void ReceiveSRShow() {
-        new Thread(new Runnable() {
-            @Override
-            public void run() {
-                while (true) {
-                    try {
-                        long startTime = System.currentTimeMillis();
-                        int [] rgbData = rgbBytesQueue.take();
-                        inputBitmap.setPixels(rgbData, 0, video_input_shape[0], 0, 0, video_input_shape[0], video_input_shape[1]);
-                        int[] outputSize = srTFLite.getOUTPUT_SIZE();
-                        int outWidth = outputSize[2];
-                        int outHeight = outputSize[1];
-
-//                        int[] outPixels = srTFLite.superResolution(rgbBitmap);
-                        srTFLite.superResolution(inputBitmap, outPixels);
-
-                        outputBitmap.setPixels(outPixels, 0, outWidth, 0, 0, outWidth, outHeight);
-                        Matrix matrix = new Matrix();
-                        if (!isPICO) {
-                            matrix.postRotate(90);
-                        }
-                        Bitmap postTransformImageBitmap = Bitmap.createBitmap(outputBitmap, 0, 0, outWidth, outHeight, matrix, false);
-                        if (!isPICO) {
-                            int tmp = outWidth;
-                            outWidth = outHeight;
-                            outHeight = tmp;
-                        }
-                        Canvas canvas = surfaceHolder.lockCanvas();
-                        if (canvas != null) {
-                            try{
-                                canvas.drawBitmap(postTransformImageBitmap, null, new Rect(0, 0, outWidth, outHeight), null);
-                            } finally {
-                                surfaceHolder.unlockCanvasAndPost(canvas);
-                            }
-                        }
-                        long endTime = System.currentTimeMillis();
-                        long costTime = endTime - startTime;
-                        updateTextView(Long.toString(costTime) + "ms");
-                    } catch (InterruptedException e) {
-                        Log.e("Error Exception", "MainActivity error: " + e.getMessage() + e.toString());
-                        Thread.currentThread().interrupt();
-                        break;
-                    }
-                }
-            }
-        }).start();
-    }
-
-    public void ReceiveSRShow2() {
-        new Thread(new Runnable() {
-            @Override
-            public void run() {
-                while (true) {
-                    try {
-                        long startTime = System.currentTimeMillis();
-                        int [] rgbData = rgbBytesQueue.take();
-                        Bitmap rgbBitmap = Bitmap.createBitmap(video_input_shape[0], video_input_shape[1], Bitmap.Config.ARGB_8888);
-                        rgbBitmap.setPixels(rgbData, 0, video_input_shape[0], 0, 0, video_input_shape[0], video_input_shape[1]);
-                        int[] outputSize = srTFLite.getOUTPUT_SIZE();
-                        int outWidth = outputSize[2];
-                        int outHeight = outputSize[1];
-
-
-//                        int[] outPixels = srTFLite.superResolution(rgbBitmap);
-                        srTFLite.superResolution(rgbBitmap, outPixels);
-
-                        Bitmap outBitmap = Bitmap.createBitmap(outWidth, outHeight, Bitmap.Config.ARGB_8888);
-                        outBitmap.setPixels(outPixels, 0, outWidth, 0, 0, outWidth, outHeight);
-
-                        Matrix matrix = new Matrix();
-                        if (!isPICO) {
-                            matrix.postRotate(90);
-                        }
-                        Bitmap postTransformImageBitmap = Bitmap.createBitmap(outBitmap, 0, 0, outWidth, outHeight, matrix, false);
-                        // 先注释掉，使用GLSurfaceView来进行视图更新
-//                        handler.post(()-> imageView.setImageBitmap(postTransformImageBitmap));
-                        long endTime = System.currentTimeMillis();
-                        long costTime = endTime - startTime;
-                        updateTextView(Long.toString(costTime) + "ms");
-
-                    } catch (InterruptedException e) {
-                        Log.e("Error Exception", "MainActivity error: " + e.getMessage() + e.toString());
-                        Thread.currentThread().interrupt();
-                        break;
-                    }
-                }
-            }
-        }).start();
-    }
+//    public void ReceiveSRShow() {
+//        new Thread(new Runnable() {
+//            @Override
+//            public void run() {
+//                while (true) {
+//                    try {
+//                        long startTime = System.currentTimeMillis();
+//                        int [] rgbData = yuvBytesQueue.take();
+//                        inputBitmap.setPixels(rgbData, 0, video_input_shape[0], 0, 0, video_input_shape[0], video_input_shape[1]);
+//                        int[] outputSize = srTFLite.getOUTPUT_SIZE();
+//                        int outWidth = outputSize[2];
+//                        int outHeight = outputSize[1];
+//
+////                        int[] outPixels = srTFLite.superResolution(rgbBitmap);
+//                        srTFLite.superResolution(inputBitmap, outPixels);
+//
+//                        outputBitmap.setPixels(outPixels, 0, outWidth, 0, 0, outWidth, outHeight);
+//                        Matrix matrix = new Matrix();
+//                        if (!isPICO) {
+//                            matrix.postRotate(90);
+//                        }
+//                        Bitmap postTransformImageBitmap = Bitmap.createBitmap(outputBitmap, 0, 0, outWidth, outHeight, matrix, false);
+//                        if (!isPICO) {
+//                            int tmp = outWidth;
+//                            outWidth = outHeight;
+//                            outHeight = tmp;
+//                        }
+//                        Canvas canvas = surfaceHolder.lockCanvas();
+//                        if (canvas != null) {
+//                            try{
+//                                canvas.drawBitmap(postTransformImageBitmap, null, new Rect(0, 0, outWidth, outHeight), null);
+//                            } finally {
+//                                surfaceHolder.unlockCanvasAndPost(canvas);
+//                            }
+//                        }
+//                        long endTime = System.currentTimeMillis();
+//                        long costTime = endTime - startTime;
+//                        updateTextView(Long.toString(costTime) + "ms");
+//                    } catch (InterruptedException e) {
+//                        Log.e("Error Exception", "MainActivity error: " + e.getMessage() + e.toString());
+//                        Thread.currentThread().interrupt();
+//                        break;
+//                    }
+//                }
+//            }
+//        }).start();
+//    }
+//
+//    public void ReceiveSRShow2() {
+//        new Thread(new Runnable() {
+//            @Override
+//            public void run() {
+//                while (true) {
+//                    try {
+//                        long startTime = System.currentTimeMillis();
+//                        int [] rgbData = yuvBytesQueue.take();
+//                        Bitmap rgbBitmap = Bitmap.createBitmap(video_input_shape[0], video_input_shape[1], Bitmap.Config.ARGB_8888);
+//                        rgbBitmap.setPixels(rgbData, 0, video_input_shape[0], 0, 0, video_input_shape[0], video_input_shape[1]);
+//                        int[] outputSize = srTFLite.getOUTPUT_SIZE();
+//                        int outWidth = outputSize[2];
+//                        int outHeight = outputSize[1];
+//
+//
+////                        int[] outPixels = srTFLite.superResolution(rgbBitmap);
+//                        srTFLite.superResolution(rgbBitmap, outPixels);
+//
+//                        Bitmap outBitmap = Bitmap.createBitmap(outWidth, outHeight, Bitmap.Config.ARGB_8888);
+//                        outBitmap.setPixels(outPixels, 0, outWidth, 0, 0, outWidth, outHeight);
+//
+//                        Matrix matrix = new Matrix();
+//                        if (!isPICO) {
+//                            matrix.postRotate(90);
+//                        }
+//                        Bitmap postTransformImageBitmap = Bitmap.createBitmap(outBitmap, 0, 0, outWidth, outHeight, matrix, false);
+//                        // 先注释掉，使用GLSurfaceView来进行视图更新
+////                        handler.post(()-> imageView.setImageBitmap(postTransformImageBitmap));
+//                        long endTime = System.currentTimeMillis();
+//                        long costTime = endTime - startTime;
+//                        updateTextView(Long.toString(costTime) + "ms");
+//
+//                    } catch (InterruptedException e) {
+//                        Log.e("Error Exception", "MainActivity error: " + e.getMessage() + e.toString());
+//                        Thread.currentThread().interrupt();
+//                        break;
+//                    }
+//                }
+//            }
+//        }).start();
+//    }
 
 
     public void updateTextView(String fps) {
@@ -736,11 +748,11 @@ public class MainActivity extends AppCompatActivity {
             }
         });
     }
-    public static void putData(int[] data) {
+    public static void putData(byte[] data) {
         try {
             Log.i("rgbQueue", "pushing data");
             // 这是一个int的数组
-            rgbBytesQueue.put(data); // 在jni代码中调用了这个函数，将解码出来的图片存储到了 rgbByteQueue队列中
+            yuvBytesQueue.put(data); // 在jni代码中调用了这个函数，将解码出来的图片存储到了 rgbByteQueue队列中
         }
         catch (InterruptedException e) {
             Log.i("rgbQueue", "pushing data error!");

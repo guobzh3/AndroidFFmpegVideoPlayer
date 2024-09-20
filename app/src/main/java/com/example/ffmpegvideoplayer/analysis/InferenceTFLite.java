@@ -31,8 +31,8 @@ import java.nio.ByteBuffer;
 public class InferenceTFLite {
     private Interpreter tflite;
     Interpreter.Options options = new Interpreter.Options();
-    private String MODEL_FILE = "quicsr_270p.tflite";  // 2x SR
-//    private String MODEL_FILE = "quicsr_float32_270pto1080p.tflite";  // 4x SR
+//    private String MODEL_FILE = "quicsr_270p.tflite";  // 2x SR
+    private String MODEL_FILE = "quicsr_float32_270pto1080p.tflite";  // 4x SR
     private final Size INPNUT_SIZE = new Size(480, 270);
     private final int[] OUTPUT_SIZE = new int[] {1, 540, 960, 3};
     private Boolean IS_INT8 = false;

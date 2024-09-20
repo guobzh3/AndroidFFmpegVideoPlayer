@@ -25,14 +25,14 @@
         app:layout_constraintLeft_toLeftOf="parent"
         android:scaleType="fitXY"
         />
-    <android.opengl.GLSurfaceView
-        android:id="@+id/glsurfaceview"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        app:layout_constraintTop_toTopOf="parent"
-        app:layout_constraintLeft_toLeftOf="parent"
-        android:scaleType="fitXY"
-        />
+<!--    <android.opengl.GLSurfaceView-->
+<!--        android:id="@+id/glsurfaceview"-->
+<!--        android:layout_width="wrap_content"-->
+<!--        android:layout_height="wrap_content"-->
+<!--        app:layout_constraintTop_toTopOf="parent"-->
+<!--        app:layout_constraintLeft_toLeftOf="parent"-->
+<!--        android:scaleType="fitXY"-->
+<!--        />-->
 <!--定义一个子布局-->
     <androidx.constraintlayout.widget.ConstraintLayout xmlns:android="http://schemas.android.com/apk/res/android"
         xmlns:app="http://schemas.android.com/apk/res-auto"

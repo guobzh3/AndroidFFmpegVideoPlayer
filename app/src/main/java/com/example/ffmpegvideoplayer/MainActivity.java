@@ -46,7 +46,7 @@ import org.tensorflow.lite.support.image.ImageProcessor;
 import org.tensorflow.lite.support.image.TensorImage;
 import org.tensorflow.lite.support.image.ops.ResizeOp;
 import org.tensorflow.lite.support.tensorbuffer.TensorBuffer;
-
+import com.example.ffmpegvideoplayer.analysis.BiTFLite;
 // renderscript 相关
 //import android.content.Context;
 //import android.graphics.Bitmap;
@@ -75,7 +75,7 @@ import com.example.ffmpegvideoplayer.MyGLRenderer;
 
 public class MainActivity extends AppCompatActivity {
 
-    private static final int QUEUE_CAPACITY = 32;
+    private static final int QUEUE_CAPACITY = 4;
     // 这个队列不能开太大，如果是 540P的图像数据的话，一个int[540*960]大小大概为2MB
     // 当时设置队列为4096的话程序运行一段时间就炸，因为内存爆了，当程序运行内存超过700MB以后就会Out of memory
     // 所以要设小点
@@ -83,7 +83,7 @@ public class MainActivity extends AppCompatActivity {
     // 通过队列来构建流水线
     private static BlockingQueue<int[]> rgbBytesQueue = new ArrayBlockingQueue<>(QUEUE_CAPACITY);
     private static BlockingQueue<TensorImage> modelInputQueue = new ArrayBlockingQueue<>(QUEUE_CAPACITY);
-    private static BlockingQueue<TensorBuffer> modelOutputQueue = new ArrayBlockingQueue<>(8);
+    private static BlockingQueue<TensorBuffer> modelOutputQueue = new ArrayBlockingQueue<>(QUEUE_CAPACITY);
     private static BlockingQueue<int[]> viewOutQueue = new ArrayBlockingQueue<>(QUEUE_CAPACITY);
     // 存储 BISR 后的结果
     private final static String mytag = "MyNativeCode";
@@ -107,14 +107,17 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private SurfaceView surfaceView;
-
+//
     private GLSurfaceView glsurfacebview;
     private SurfaceHolder surfaceHolder;
     private ImageView imageView;
     private Handler handler;
 
+    private Bitmap model_input_bitmap;
+    // bi-tflite
+    private BiTFLite biTFLite;
     // 创建一个GLSurfaceView
-    private GLSurfaceView mGLSurfaceView;
+//    private GLSurfaceView mGLSurfaceView;
 
     private TextView frameSizeTextView;
     private TextView fpsTextView;
@@ -126,44 +129,18 @@ public class MainActivity extends AppCompatActivity {
     Bitmap inputBitmap;
     Bitmap outputBitmap;
 
+    private Bitmap rgbBitmap;
     ImageProcessor imageProcessor ;
-//    public Bitmap applyBlur(Context context, Bitmap inputBitmap, float blurRadius) {
-//        // 创建RenderScript实例
-//        RenderScript rs = RenderScript.create(context);
-//
-//        // 创建输入和输出Allocation
-//        Allocation inputAllocation = Allocation.createFromBitmap(rs, inputBitmap);
-//        Allocation outputAllocation = Allocation.createTyped(rs, inputAllocation.getType());
-//
-//        // 加载RenderScript脚本
-//
-////        ScriptC_try blurScript = new ScriptC_try(rs);
-////        blurScript.set_inImage(inputAllocation);
-////        blurScript.set_outImage(outputAllocation);
-////        blurScript.set_blurRadius(blurRadius);
-////
-////        // 执行模糊操作
-////        blurScript.invoke_root();
-//
-//        // 创建输出位图并复制数据
-//        Bitmap outputBitmap = Bitmap.createBitmap(inputBitmap.getWidth(), inputBitmap.getHeight(), inputBitmap.getConfig());
-//        outputAllocation.copyTo(outputBitmap);
-//
-//        // 销毁资源和清理
-//        inputAllocation.destroy();
-//        outputAllocation.destroy();
-//        rs.destroy();
-//
-//        return outputBitmap;
-//    }
+
+
     /*
     TextureView 相关部分
      */
     private static final String TAG = "Filter_TVActivity";
-    private TextureView mTextureView;
-    private SurfaceTexture mOESSurfaceTexture;
-    private int mOESTextureId_1 = -1;
-    private int mOESTextureId_2 = -1;
+//    private TextureView mTextureView;
+//    private SurfaceTexture mOESSurfaceTexture;
+//    private int mOESTextureId_1 = -1;
+//    private int mOESTextureId_2 = -1;
     private MyGLRenderer mRenderer;
 
     // 创建一个外部纹理
@@ -199,37 +176,37 @@ public class MainActivity extends AppCompatActivity {
         return tex[0];
     }
 
-    public TextureView.SurfaceTextureListener mTextureListener = new TextureView.SurfaceTextureListener() {
-        @Override
-        public void onSurfaceTextureAvailable(SurfaceTexture surface, int width, int height) {
-            mOESTextureId_1 = createTexture2DObject(); // 创建了一个OES纹理对象
-            mOESTextureId_2 = createTexture2DObject();
-            mRenderer.init(mTextureView, mOESTextureId_1,mOESTextureId_2, MainActivity.this); // 初始化
-            mOESSurfaceTexture = mRenderer.initOESTexture(); //这里会先创建一个SurfaceTexture，然后跟一个external_texture_ID绑定，并返回这个surfaceTexture
-
-            // 设置SurfaceTexture
-        }
-
-        @Override
-        public void onSurfaceTextureSizeChanged(SurfaceTexture surface, int width, int height) {
-        }
-
-        @Override
-        public boolean onSurfaceTextureDestroyed(SurfaceTexture surface) {
-            return true;
-        }
-
-        @Override
-        public void onSurfaceTextureUpdated(SurfaceTexture surface) {
-        }
-
-    };
+//    public TextureView.SurfaceTextureListener mTextureListener = new TextureView.SurfaceTextureListener() {
+//        @Override
+//        public void onSurfaceTextureAvailable(SurfaceTexture surface, int width, int height) {
+//            mOESTextureId_1 = createTexture2DObject(); // 创建了一个OES纹理对象
+//            mOESTextureId_2 = createTexture2DObject();
+//            mRenderer.init(mTextureView, mOESTextureId_1,mOESTextureId_2, MainActivity.this); // 初始化
+//            mOESSurfaceTexture = mRenderer.initOESTexture(); //这里会先创建一个SurfaceTexture，然后跟一个external_texture_ID绑定，并返回这个surfaceTexture
+//
+//            // 设置SurfaceTexture
+//        }
+//
+//        @Override
+//        public void onSurfaceTextureSizeChanged(SurfaceTexture surface, int width, int height) {
+//        }
+//
+//        @Override
+//        public boolean onSurfaceTextureDestroyed(SurfaceTexture surface) {
+//            return true;
+//        }
+//
+//        @Override
+//        public void onSurfaceTextureUpdated(SurfaceTexture surface) {
+//        }
+//
+//    };
     private void initModel() {
         Log.i("dada","initModel. ispico : " + (this.isPICO));
 
         try {
             this.srTFLite = new InferenceTFLite();
-
+            this.biTFLite = new BiTFLite();
             if (this.isPICO) {
                 this.srTFLite.addGPUDelegate(); // pico的话，使用GPU代理
                 Log.i("dada","addGPUDelegate");
@@ -242,6 +219,7 @@ public class MainActivity extends AppCompatActivity {
 //            this.srTFLite.addNNApiDelegate();
 
             this.srTFLite.initialModel(this);
+            this.biTFLite.initialModel(this);
         } catch (Exception e) {
             Log.e("Error Exception", "MainActivity initial model error: " + e.getMessage() + e.toString());
         }
@@ -253,50 +231,51 @@ public class MainActivity extends AppCompatActivity {
 
         // 初始化GLSurfaceView
 //        mGLSurfaceView = new GLSurfaceView(this);
-        final ActivityManager activityManager = (ActivityManager) getSystemService(Context.ACTIVITY_SERVICE);
-        final ConfigurationInfo configurationInfo = activityManager.getDeviceConfigurationInfo();
-        final boolean supportsEs2 = configurationInfo.reqGlEsVersion >= 0x20000;
+//        final ActivityManager activityManager = (ActivityManager) getSystemService(Context.ACTIVITY_SERVICE);
+//        final ConfigurationInfo configurationInfo = activityManager.getDeviceConfigurationInfo();
+//        final boolean supportsEs2 = configurationInfo.reqGlEsVersion >= 0x20000;
 
-        if (supportsEs2)
-        {
-            // Request an OpenGL ES 2.0 compatible context.
-//            mGLSurfaceView.setEGLContextClientVersion(2);
-
-            // Set the renderer to our demo renderer, defined below.
-            // 我只需要修改这个setrenderer就可以展示我自己设计的renderer了 ！yes！
-//			mGLSurfaceView.setRenderer(new LessonFourRenderer(this));
-//            renderer = new MyRenderer(this);
-//            mGLSurfaceView.setRenderer(renderer);
-//            mGLSurfaceView.setRenderMode(GLSurfaceView.RENDERMODE_WHEN_DIRTY);
-            Log.i("gles","support GLES");
-        }
-        else{
-            Log.e("gles","not support GLES");
-            return ;
-        }
+//        if (supportsEs2)
+//        {
+//            // Request an OpenGL ES 2.0 compatible context.
+////            mGLSurfaceView.setEGLContextClientVersion(2);
+//
+//            // Set the renderer to our demo renderer, defined below.
+//            // 我只需要修改这个setrenderer就可以展示我自己设计的renderer了 ！yes！
+////			mGLSurfaceView.setRenderer(new LessonFourRenderer(this));
+////            renderer = new MyRenderer(this);
+////            mGLSurfaceView.setRenderer(renderer);
+////            mGLSurfaceView.setRenderMode(GLSurfaceView.RENDERMODE_WHEN_DIRTY);
+//            Log.i("gles","support GLES");
+//        }
+//        else{
+//            Log.e("gles","not support GLES");
+//            return ;
+//        }
 
         // TextureView 相关部分：
         //设置全屏无状态栏，并竖屏显示
-        getWindow().setFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN, WindowManager.LayoutParams.FLAG_FULLSCREEN);
-        requestWindowFeature(Window.FEATURE_NO_TITLE);
-        setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_PORTRAIT);
+//        getWindow().setFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN, WindowManager.LayoutParams.FLAG_FULLSCREEN);
+//        requestWindowFeature(Window.FEATURE_NO_TITLE);
+//        setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_PORTRAIT);
 
-        mTextureView = new TextureView(this);
-        mTextureView.setSurfaceTextureListener(mTextureListener);
-        //设置隐藏虚拟按键
-        //mTextureView.setSystemUiVisibility(View.SYSTEM_UI_FLAG_HIDE_NAVIGATION);
-        mRenderer = new MyGLRenderer();
-        setContentView(mTextureView);
+//        mTextureView = new TextureView(this);
+//        mTextureView.setSurfaceTextureListener(mTextureListener);
+//        //设置隐藏虚拟按键
+//        //mTextureView.setSystemUiVisibility(View.SYSTEM_UI_FLAG_HIDE_NAVIGATION);
+//        mRenderer = new MyGLRenderer();
+//        setContentView(mTextureView);
 //        LinearLayout layout = findViewById(R.id.layout);
 //        setContentView(mGLSurfaceView);
 
 //        setContentView(R.layout.activity_main);
 //        glsurfacebview = findViewById(R.id.glsurfaceview);
 //        glsurfacebview.setRenderer(renderer);
+        setContentView(R.layout.activity_main);
         // params
-//        surfaceView = findViewById(R.id.surfaceView);
-//        surfaceHolder = surfaceView.getHolder(); //获取对低层surface的访问
-//        imageView = findViewById(R.id.imageView);
+        surfaceView = findViewById(R.id.surfaceView);
+        surfaceHolder = surfaceView.getHolder(); //获取对低层surface的访问
+        imageView = findViewById(R.id.imageView);
         /**
          * 用于线程管理：
              * Looper 是一个循环，负责管理和分发线程中的消息和任务队列。
@@ -307,8 +286,11 @@ public class MainActivity extends AppCompatActivity {
         handler = new Handler(Looper.getMainLooper());
 
         outPixels = new int [video_output_shape.getHeight() * video_output_shape.getWidth()];
+//        outPixels = new int [tf_output_shape[0] * tf_output_shape[1]];
         inputBitmap = Bitmap.createBitmap(video_input_shape[0], video_input_shape[1], Bitmap.Config.ARGB_8888); // 输入的图片(先宽后高）
         outputBitmap = Bitmap.createBitmap(video_output_shape.getWidth(), video_output_shape.getHeight(), Bitmap.Config.ARGB_8888); // 输出的图片
+        model_input_bitmap= Bitmap.createBitmap(tf_input_shape[0] , tf_input_shape[1] , Bitmap.Config.ARGB_8888);
+        rgbBitmap = Bitmap.createBitmap(video_input_shape[0], video_input_shape[1], Bitmap.Config.ARGB_8888);
 
         // 出初始化对图像进行预处理的类
         imageProcessor = new ImageProcessor.Builder()
@@ -334,72 +316,8 @@ public class MainActivity extends AppCompatActivity {
             }
         }).start();
 
-//        ReceiveSRShow2();
         // 主要处理程序
         mainProcess();
-//        surfaceHolder.addCallback(new SurfaceHolder.Callback() {
-//            @Override
-//            public void surfaceCreated(@NonNull SurfaceHolder holder) {
-////               ReceiveAndShow();
-//                ReceiveSRShow();
-////                mainProcess();
-//            }
-//
-//            @Override
-//            public void surfaceChanged(@NonNull SurfaceHolder holder, int format, int width, int height) {
-//
-//            }
-//
-//            @Override
-//            public void surfaceDestroyed(@NonNull SurfaceHolder holder) {
-//
-//            }
-//        });
-    }
-    public void ReceiveAndShow() {
-        new Thread(new Runnable() {
-            @Override
-            public void run() {
-                while (true) {
-                    try {
-                        long startTime = System.currentTimeMillis();
-                        int [] rgbData = rgbBytesQueue.take();
-                        Bitmap rgbBitmap = Bitmap.createBitmap(video_input_shape[0], video_input_shape[1], Bitmap.Config.ARGB_8888);
-//                        Bitmap.Config.RGBA_F16
-                        // 用rgbData中的数据来填充这个bitmap
-                        rgbBitmap.setPixels(rgbData, 0, video_input_shape[0], 0, 0, video_input_shape[0], video_input_shape[1]);
-                        Matrix matrix = new Matrix();
-                        if (!isPICO) {
-                            matrix.postRotate(90);
-                        }
-                        Bitmap postTransformImageBitmap = Bitmap.createBitmap(rgbBitmap, 0, 0, video_input_shape[0], video_input_shape[1], matrix, false);
-                        int outHeight = video_input_shape[1];
-                        int outWidth = video_input_shape[0];
-                        if (isPICO) {
-                            outHeight = video_input_shape[0];
-                            outWidth = video_input_shape[1];
-                        }
-
-                        Canvas canvas = surfaceHolder.lockCanvas();
-                        if (canvas != null) {
-                            try{
-                                canvas.drawBitmap(postTransformImageBitmap, null, new Rect(0, 0, outHeight, outWidth), null);
-                            } finally {
-                                surfaceHolder.unlockCanvasAndPost(canvas);
-                            }
-                        }
-
-                        long endTime = System.currentTimeMillis();
-                        long costTime = endTime - startTime;
-//                        updateTextView(Long.toString(costTime) + "ms");
-                    } catch (InterruptedException e) {
-                        Log.e("Error Exception", "MainActivity error: " + e.getMessage() + e.toString());
-                        Thread.currentThread().interrupt();
-                        break;
-                    }
-                }
-            }
-        }).start();
     }
 
     //tips: 学习多线程用队列进行流水线的写法
@@ -438,6 +356,7 @@ public class MainActivity extends AppCompatActivity {
                         int h_start = tile_index[1] * tf_input_shape[1];
                         Log.i(mytag, "w_start " + w_start + " h_start " + h_start + " tf_input_shape[0] " + tf_input_shape[0] + " tf_input_shape[1] " + tf_input_shape[1] + " tile_split[0]" + tile_split[0] + " tile_split[1]" + tile_split[1]);
                         int k = 0;
+                        // 这个for循环可以用拷贝代替
                         for (int i = h_start;i < h_start + tile_split[1] ;i++){
                             for (int j = w_start ; j < w_start + tile_split[0] ;j++){
                                 int index = i * video_input_shape[0] + j;
@@ -449,7 +368,7 @@ public class MainActivity extends AppCompatActivity {
 
                             }
                         }
-                        Bitmap model_input_bitmap= Bitmap.createBitmap(tf_input_shape[0] , tf_input_shape[1] , Bitmap.Config.ARGB_8888);
+//                        Bitmap model_input_bitmap= Bitmap.createBitmap(tf_input_shape[0] , tf_input_shape[1] , Bitmap.Config.ARGB_8888);
                         model_input_bitmap.setPixels(model_input , 0 , tf_input_shape[0],0,0,tf_input_shape[0],tf_input_shape[1]);
                         end_time = System.currentTimeMillis();
                         // TODO: 接着写
@@ -466,19 +385,23 @@ public class MainActivity extends AppCompatActivity {
                         }
                         // TODO：对剩下的数据进行bi放大，并放到bioutputQueue中
                         // 初始化bitmap并放大bitmap中
-                        Bitmap rgbBitmap = Bitmap.createBitmap(video_input_shape[0], video_input_shape[1], Bitmap.Config.ARGB_8888);
+//                        Bitmap rgbBitmap = Bitmap.createBitmap(video_input_shape[0], video_input_shape[1], Bitmap.Config.ARGB_8888);
                         rgbBitmap.setPixels(rgbData, 0, video_input_shape[0],  0,  0, video_input_shape[0], video_input_shape[1]);
 //                        BitmapFactory.de
 //                        start_time = System.currentTimeMillis();
                         // 1. 使用Bitmap.createScaledBitmap 接口进行bilinear放大
+                        Bitmap dst = Bitmap.createBitmap(video_output_shape.getWidth(),video_output_shape.getHeight(), Bitmap.Config.ARGB_8888);
 //                        Bitmap dst = Bitmap.createScaledBitmap(rgbBitmap, video_output_shape.getWidth(),video_output_shape.getHeight() , true);
+                        // 在这里使用tensorflow-lite来进行bi
+//                        int[] bicubic_outpixels = new int[video_output_shape.getHeight() * video_output_shape.getWidth()];
+//                        biTFLite.superResolution(rgbBitmap , bicubic_outpixels);
 //                        end_time = System.currentTimeMillis();
 //                        cost_time = end_time - start_time;
 //                        Log.i(time_tag , "bilinear time: " + cost_time + " ms");
                         // 存放到biSROutputQueue中
                         try {
-                            biSROutputQueue.put(rgbBitmap);
-//                            biSROutputQueue.put(dst);
+//                            biSROutputQueue.put(rgbBitmap);
+                            biSROutputQueue.put(dst);
 //                            biSROutputQueue.put(model_input_bitmap);
                             Log.i(mytag, "bisroutputqueue size: " + biSROutputQueue.size());
                         } catch (InterruptedException e) {
@@ -596,8 +519,8 @@ public class MainActivity extends AppCompatActivity {
                                 outPixels[yp++] = 0xff000000 | (r << 16 & 0xff0000) | (g << 8 & 0xff00) | (b & 0xff);
                             }
                         }
-                        Bitmap srBitmap = Bitmap.createBitmap(tf_output_shape[1],tf_output_shape[0], Bitmap.Config.ARGB_8888);
-                        srBitmap.setPixels(outPixels,0,tf_output_shape[1],0,0,tf_output_shape[1],tf_output_shape[0]);
+//                        Bitmap srBitmap = Bitmap.createBitmap(tf_output_shape[1],tf_output_shape[0], Bitmap.Config.ARGB_8888);
+//                        srBitmap.setPixels(outPixels,0,tf_output_shape[1],0,0,tf_output_shape[1],tf_output_shape[0]);
 
                         end_time = System.currentTimeMillis();
                         cost_time = end_time - start_time;
@@ -607,8 +530,8 @@ public class MainActivity extends AppCompatActivity {
 //                        GLUtils.texImage2D();
 //                        renderer.set_bi_Bitmap(outBitmap);
 //                        renderer.set_sr_bitmap(srBitmap);
-                        mRenderer.set_bi_texture(outBitmap);
-                        mRenderer.set_sr_texture(srBitmap);
+//                        mRenderer.set_bi_texture(outBitmap);
+//                        mRenderer.set_sr_texture(srBitmap);
 //                        renderer.updateSurface_Flag = true;
 //                        mGLSurfaceView.requestRender();
 
@@ -637,12 +560,12 @@ public class MainActivity extends AppCompatActivity {
                             matrix.postRotate( 0);
                         }
 //                        Bitmap postTransformImageBitmap = Bitmap.createBitmap(outBitmap, 0, 0, video_output_shape.getWidth(), video_output_shape.getHeight(), matrix, false);
-//                        Bitmap postTransformImageBitmap = Bitmap.createBitmap(outBitmap, 0, 0, outBitmap.getWidth(),outBitmap.getHeight(), matrix, false);
+                        Bitmap postTransformImageBitmap = Bitmap.createBitmap(outBitmap, 0, 0, outBitmap.getWidth(),outBitmap.getHeight(), matrix, false);
 
                         // 使用创建的 Handler 对象，将一个任务（更新 ImageView 的图像）发送到主线程执行。
                         // tips：在 Android 中，所有的 UI 操作必须在主线程（UI 线程）上进行。如果你在后台线程（如异步任务或网络操作线程）上尝试更新 UI，会导致应用崩溃。这是因为 Android 的 UI 组件不是线程安全的。
                         // 只有主线程可以更新视图
-//                        handler.post(()-> imageView.setImageBitmap(postTransformImageBitmap));
+                        handler.post(()-> imageView.setImageBitmap(postTransformImageBitmap));
                         end_time = System.currentTimeMillis();
                         cost_time = end_time - start_time;
 //                        long endTime = System.currentTimeMillis();
@@ -775,7 +698,7 @@ public class MainActivity extends AppCompatActivity {
                         }
                         Bitmap postTransformImageBitmap = Bitmap.createBitmap(outBitmap, 0, 0, outWidth, outHeight, matrix, false);
                         // 先注释掉，使用GLSurfaceView来进行视图更新
-//                        handler.post(()-> imageView.setImageBitmap(postTransformImageBitmap));
+                        handler.post(()-> imageView.setImageBitmap(postTransformImageBitmap));
                         long endTime = System.currentTimeMillis();
                         long costTime = endTime - startTime;
                         updateTextView(Long.toString(costTime) + "ms");

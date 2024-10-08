@@ -79,7 +79,7 @@ public class BiTFLite {
 //                .add(new ResizeOp(INPNUT_SIZE.getHeight(), INPNUT_SIZE.getWidth(), ResizeOp.ResizeMethod.BILINEAR))
 //                .add(new NormalizeOp(0, 255))
 //                .build();
-
+        Log.i("TFLite inference time:","input shape w:" + bitmap.getWidth() + " h: " + bitmap.getHeight());
         modelInput.load(bitmap);
 //        modelInput = imageProcessor.process(modelInput);
         long endTime = System.currentTimeMillis();
@@ -88,7 +88,7 @@ public class BiTFLite {
         startTime = System.currentTimeMillis();
         TensorBuffer hwcOutputTensorBuffer;
 //        if (IS_INT8) {
-        hwcOutputTensorBuffer = TensorBuffer.createFixedSize(OUTPUT_SIZE, DataType.UINT8);
+        hwcOutputTensorBuffer = TensorBuffer.createFixedSize(OUTPUT_SIZE, DataType.UINT8); // 这里好像没问题，存疑一下
 //        } else {
 //            hwcOutputTensorBuffer = TensorBuffer.createFixedSize(OUTPUT_SIZE, DataType.FLOAT32);
 //        }

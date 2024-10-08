@@ -35,6 +35,10 @@ public:
     int video_index;
     int frame_decoded_count;
 
+    // multithread yuv2rgb
+    int thread_num;
+    std::vector<std::thread> process_thread;
+
     StreamPlayer(JavaVM* javaVM, jstring url) {
         // javaVM ： java线程的句柄
         // 要在jni代码的线程中调用java代码的方法，必须把当前线程连接到VM中，获取到一个[JNIEnv*].
@@ -59,11 +63,15 @@ public:
             throw std::runtime_error("Failed to find class MainActivity");
         }
         // 获取在MainActivity中定义的 putData 方法
-        this->funcMethod = env->GetStaticMethodID(cls, "putData", "([I)V");
+        this->funcMethod = env->GetStaticMethodID(cls, "putData", "([B)V");
 
         this->frame_decoded_count = 0;
         this->deFormatc = createFormatc(url); // 用于读取packet av_read_frame(this->deFormatc, input_packet);
         this->deCodecc = createCodecc(this->deFormatc); // 用于对packet进行解码，avcodec_send_packet(this->deCodecc, received_packet); avcodec_receive_frame(this->deCodecc, input_frame);
+
+        // multithread yuv2rgb
+        this->thread_num = 8;
+        this->process_thread = std::vector<std::thread>(this->thread_num);
     }
 
     AVFormatContext* createFormatc(jstring url) {
@@ -235,25 +243,25 @@ public:
         int width = frame->width;
         int height = frame->height;
 //      创建一个新的jintArray
-        jintArray outFrame = env->NewIntArray(width * height);
+        jbyteArray outFrame = env->NewByteArray(width * height * 3 / 2);
         if (outFrame == nullptr) {
             LOGI("Failed to allocate memory");
             return -1;
         }
         // 获取新建的jintArray的指针，后续可以将数据存放在该array中
-        jint* outData = env->GetIntArrayElements(outFrame, nullptr); // 返回具体元素的指针
+        jbyte* outData = env->GetByteArrayElements(outFrame, nullptr); // 返回具体元素的指针
         if (outData == nullptr) {
             LOGI("outData is nullptr");
             return -1;
         }
         auto startTime = std::chrono::high_resolution_clock::now();
         // process
-//        int thread_num = 2;
-//        std::vector<std::thread> process_thread(thread_num);
+//        int thread_num = this->thread_num;
 //        for (int th = 0; th < thread_num; th++) {
 //            process_thread[th] = std::thread(
-//                        [&frame, &outData, width, height, th, thread_num]() {
+//                        [&frame, &outData, width, height, th, this]() {
 //                            LOGI( "decode thread :%d ",th );
+//                            auto threadstarttime = std::chrono::high_resolution_clock::now();
 //                            int yp = (height / thread_num) * width * th;
 //                            int endIn = th < (thread_num - 1) ? (height / thread_num) * th + (height / thread_num) : height;
 //                            for (int j = (height / thread_num) * th; j < endIn; j++) {
@@ -267,6 +275,9 @@ public:
 //                                    outData[yp++] = YUV2RGB(0xff & yData, 0xff & uData, 0xff & vData);
 //                                }
 //                            }
+//                            auto threadendtime = std::chrono::high_resolution_clock::now();
+//                            auto threadduration = std::chrono::duration_cast<std::chrono::milliseconds>(threadendtime - threadstarttime);
+//                            LOGI("threadduration cost Time = %f ms", (double)(threadduration.count()) );
 //                        }
 //                    );
 //        }
@@ -308,25 +319,28 @@ public:
 //        for (auto& th: process_thread) th.join();
 
         // linesize[0~2] 分别对应了YUV通道
-        int yp = 0;
-        for (int j = 0; j < height; j++) {
-            // 找到该行开始位置的索引
-            int pY = frame->linesize[0] * j;
-            int pU = (frame->linesize[1]) * (j >> 1); // 左移一位，就是除以2，因为两行Y共用一行 U 的数据
-            int pV = (frame->linesize[2]) * (j >> 1); // 左移一位，就是除以2，因为两行Y共用一行 V 的数据
-            for (int i = 0; i < width; i++) {
-                int yData = frame->data[0][pY + i];
-                int uData = frame->data[1][pU + (i >> 1)]; // 左移一位，就是除以2，因为两列Y共用一行 U 的数据
-                int vData = frame->data[2][pV + (i >> 1)]; // 左移一位，就是除以2，因为两列Y共用一行 V 的数据
-                outData[yp++] = YUV2RGB(0xff & yData, 0xff & uData, 0xff & vData); // 转化为RGB
-            }
-        }
+//        int yp = 0;
+//        for (int j = 0; j < height; j++) {
+//            // 找到该行开始位置的索引
+//            int pY = frame->linesize[0] * j;
+//            int pU = (frame->linesize[1]) * (j >> 1); // 左移一位，就是除以2，因为两行Y共用一行 U 的数据
+//            int pV = (frame->linesize[2]) * (j >> 1); // 左移一位，就是除以2，因为两行Y共用一行 V 的数据
+//            for (int i = 0; i < width; i++) {
+//                int yData = frame->data[0][pY + i];
+//                int uData = frame->data[1][pU + (i >> 1)]; // 左移一位，就是除以2，因为两列Y共用一行 U 的数据
+//                int vData = frame->data[2][pV + (i >> 1)]; // 左移一位，就是除以2，因为两列Y共用一行 V 的数据
+//                outData[yp++] = YUV2RGB(0xff & yData, 0xff & uData, 0xff & vData); // 转化为RGB
+//            }
+//        }
+        std::memcpy(outData, frame->data[0], frame->width * frame->height);
+        std::memcpy(outData + frame->width * frame->height, frame->data[1], frame->width * frame->height / 4);
+        std::memcpy(outData + frame->width * frame->height + frame->width * frame->height / 4, frame->data[2], frame->width * frame->height / 4);
 
         auto endTime = std::chrono::high_resolution_clock::now();
         auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime);
-        LOGI("avFrameYUV420ToARGB8888 cost Time = %f ms", (double)(duration.count()) );
+        LOGI("copy avframe to byte[] cost Time = %f ms", (double)(duration.count()));
         // 释放c++中的数组元素，并同步回java层
-        env->ReleaseIntArrayElements(outFrame, outData, 0);
+        env->ReleaseByteArrayElements(outFrame, outData, 0);
         // 调用外部的java函数，将解码得到的数据存放到了队列中；其他的线程检测到这个队列中有数据了，就可以获取数据并进行推理了
         // this->cls: 表示要调用的方法所属的 Java 类的引用,this->funcMethod: 表示要调用的 Java 静态方法的引用,outFrame: 传递给 Java 静态方法的参数，即解码后的 jintArray
         // cls是MainAcitivity，method 是 MainActivity中的putData函数，outFrame是传递给java方法的参数（jint* 指针）

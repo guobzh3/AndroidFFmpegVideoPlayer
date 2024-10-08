@@ -31,10 +31,23 @@ import java.nio.ByteBuffer;
 public class InferenceTFLite {
     private Interpreter tflite;
     Interpreter.Options options = new Interpreter.Options();
-//    private String MODEL_FILE = "quicsr_270p.tflite";
-    private String MODEL_FILE = "quicsr_float32_270pto1080p.tflite";
     private final Size INPNUT_SIZE = new Size(480, 270);
-    private final int[] OUTPUT_SIZE = new int[] {1, 540, 960, 3};
+
+//    private String MODEL_FILE = "quicsr_270p.tflite"; // 270p -> 540p
+//private String MODEL_FILE = "quicsr_int32_270pto540p.tflite"; // 270p -> 540p
+//private String MODEL_FILE = "quicsr_v2_270pto540p.tflite"; // 270p -> 540p
+//private String MODEL_FILE = "quicsr_ds_270pto540p.tflite"; // 270p -> 540p
+//private String MODEL_FILE = "quicsr_ds_540pto1080p.tflite"; // 270p -> 540p quicsr_ds_dStride2_540pto1080p.tflite
+private String MODEL_FILE = "quicsr_ds_dStride2_270pto540p_noresnet.tflite"; // 270p -> 540p quicsr_ds_dStride2_540pto1080p.tflite
+//    private String MODEL_FILE = "quicsr_ds_dStride2_540pto1080p_1.tflite"; // 270p -> 540p quicsr_ds_dStride2_540pto1080p.tflite
+//    private String MODEL_FILE = "quicsr_v2_270pto540p_matrix.tflite"; // 270p -> 540p
+//    private String MODEL_FILE = "quicsr_v2_270pto540p_matmul.tflite"; // 270p -> 540p
+    private final int[] OUTPUT_SIZE = new int[] {1, 540, 960, 1};// 270p -> 540p
+//private String MODEL_FILE = "quicsr_float32_270pto1080p.tflite"; // 270p -> 1080p
+//    private String MODEL_FILE = "quicsr_int32_270pto1080p.tflite"; // 270p -> 1080p
+//    private String MODEL_FILE = "quicsr_ds_270pto1080p.tflite"; // 270p -> 1080p
+//    private final int[] OUTPUT_SIZE = new int[] {1, 1080, 1920, 3};// 270p -> 1080p
+//    private final int[] OUTPUT_SIZE = new int[] {1, 1080, 1920, 3};// 270p -> 1080p
     private Boolean IS_INT8 = false;
     MetadataExtractor.QuantizationParams input5SINT8QuantParams = new MetadataExtractor.QuantizationParams(0.003921568859368563f, 0);
     MetadataExtractor.QuantizationParams output5SINT8QuantParams = new MetadataExtractor.QuantizationParams(0.003921568859368563f, 0);
@@ -72,8 +85,12 @@ public class InferenceTFLite {
     // 这里超分直接返回的是tensorBuffer，并没有进行后续的转换bitmap等操作
     public TensorBuffer superResolution(TensorImage modelInput , int [] tf_output_shape) {
         TensorBuffer hwcOutputTensorBuffer;
+//        int[] output_size = new int[] {1 , tf_output_shape[1] , tf_output_shape[0] , 3};
+        // 新的输出
         int[] output_size = new int[] {1 , tf_output_shape[1] , tf_output_shape[0] , 3};
         hwcOutputTensorBuffer = TensorBuffer.createFixedSize(output_size, DataType.FLOAT32);
+//        hwcOutputTensorBuffer = TensorBuffer.createFixedSize(output_size, DataType.INT32);
+
         if (tflite != null) {
             tflite.run(modelInput.getBuffer(), hwcOutputTensorBuffer.getBuffer());
         }
@@ -128,7 +145,9 @@ public class InferenceTFLite {
         }
 
         startTime = System.currentTimeMillis();
-        float[] hwcOutputData = hwcOutputTensorBuffer.getFloatArray();
+        int[] hwcOutputData = hwcOutputTensorBuffer.getIntArray();
+
+//        float[] hwcOutputData = hwcOutputTensorBuffer.getFloatArray();
         int yp = 0;
         for (int h = 0; h < outHeight; h++) {
             for (int w = 0; w < outWidth; w++) {

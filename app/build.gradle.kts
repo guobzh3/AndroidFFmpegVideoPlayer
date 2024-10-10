@@ -8,7 +8,8 @@ android {
 
     defaultConfig {
         applicationId = "com.example.ffmpegvideoplayer"
-        minSdk = 20
+        minSdk = 29
+        //noinspection ExpiredTargetSdkVersion
         targetSdk = 29
         versionCode = 1
         versionName = "1.0"

@@ -69,7 +69,7 @@ public class MainActivity extends AppCompatActivity {
     // 通过队列来构建流水线
     private static BlockingQueue<byte[]> yuvBytesQueue = new ArrayBlockingQueue<>(QUEUE_CAPACITY);
     private static BlockingQueue<TensorImage> modelInputQueue = new ArrayBlockingQueue<>(QUEUE_CAPACITY);
-    private static BlockingQueue<TensorBuffer> modelOutputQueue = new ArrayBlockingQueue<>(16);
+    private static BlockingQueue<TensorBuffer> modelOutputQueue = new ArrayBlockingQueue<>(QUEUE_CAPACITY);
     private static BlockingQueue<int[]> viewOutQueue = new ArrayBlockingQueue<>(QUEUE_CAPACITY);
     // 存储 BISR 后的结果
     private final static String mytag = "MyNativeCode";
@@ -114,6 +114,7 @@ public class MainActivity extends AppCompatActivity {
     private Bitmap bicubicSR_bitmap;
     private int[] outPixels;
 
+    // res for BI
     private MyRenderer renderer;
     Bitmap inputBitmap;
     Bitmap outputBitmap;
@@ -450,7 +451,7 @@ public class MainActivity extends AppCompatActivity {
 //                            int[] bicubicSR_outixels = new int[video_output_shape.getWidth() * video_output_shape.getHeight()];
 //                            biTFLite.superResolution(inputBitmap , bicubicSR_outixels);
 //                            bicubicSR_bitmap.setPixels(bicubicSR_outixels , 0,video_output_shape.getWidth(),0,0,video_output_shape.getWidth(),video_output_shape.getHeight());
-                            biSROutputQueue.put(outputBitmap);
+                            biSROutputQueue.put(outputBitmap.copy(outputBitmap.getConfig(), true));
 
 //                            biSROutputQueue.put(model_input_bitmap);
                             Log.i(mytag, "bisroutputqueue size: " + biSROutputQueue.size());
@@ -539,96 +540,94 @@ public class MainActivity extends AppCompatActivity {
 //    }
     //后处理模块
     public void afterProcess2() {
-        new Thread(new Runnable() {
-            @Override
-            public void run() {
-                while (true) {
-                    try {
-                        TensorBuffer hwcOutputTensorBuffer = modelOutputQueue.take();
-                        Log.i(mytag , "hwcOutputTensorBuffer " + hwcOutputTensorBuffer.getShape()[0] + " " + hwcOutputTensorBuffer.getShape()[1] + " " +
-                                hwcOutputTensorBuffer.getShape()[2] + " " + hwcOutputTensorBuffer.getShape()[3]);
-                        long start_time , end_time , cost_time ;
+        new Thread(() -> {
+            while (true) {
+                try {
+                    TensorBuffer hwcOutputTensorBuffer = modelOutputQueue.take();
+                    Log.i(mytag , "hwcOutputTensorBuffer " + hwcOutputTensorBuffer.getShape()[0] + " " + hwcOutputTensorBuffer.getShape()[1] + " " +
+                            hwcOutputTensorBuffer.getShape()[2] + " " + hwcOutputTensorBuffer.getShape()[3]);
+                    long start_time , end_time , cost_time ;
 //                        int[] hwcOutputData = hwcOutputTensorBuffer.getIntArray(); // 首先从tensorbuffer中获取浮点数组
-                        float[] hwcOutputData = hwcOutputTensorBuffer.getFloatArray(); // 首先从tensorbuffer中获取浮点数组
-                        for (int i = 19200;i < 19200+10;i++){
-                            Log.i("check output","check output: i = " + i  + ", value = " + hwcOutputData[i]);
-                        }
-                        int outHeight = tf_output_shape[0]; //
-                        int outWidth = tf_output_shape[1];
-                        start_time = System.currentTimeMillis();
+                    float[] hwcOutputData = hwcOutputTensorBuffer.getFloatArray(); // 首先从tensorbuffer中获取浮点数组
+//                        for (int i = 19200;i < 19200+10;i++){
+//                            Log.i("check output","check output: i = " + i  + ", value = " + hwcOutputData[i]);
+//                        }
+                    int outHeight = tf_output_shape[0]; //
+                    int outWidth = tf_output_shape[1];
+                    start_time = System.currentTimeMillis();
 
-                        // 将浮点数据转化成int[] 的ARGB数据
+                    // 将浮点数据转化成int[] 的ARGB数据
 //                        outPixels = hwcOutputData;
-                        int yp = 0;
-                        for (int h = 0; h < outHeight; h++) {
-                            for (int w = 0; w < outWidth; w++) {
-                                // 下标越界了这里
-                                int r = (int) (hwcOutputData[h * outWidth * 3 + w * 3] * 255);
-                                int g = (int) (hwcOutputData[h * outWidth * 3 + w * 3 + 1] * 255);
-                                int b = (int) (hwcOutputData[h * outWidth * 3 + w * 3 + 2] * 255);
+                    int yp = 0;
+                    for (int h = 0; h < outHeight; h++) {
+                        for (int w = 0; w < outWidth; w++) {
+                            // 下标越界了这里
+                            int r = (int) (hwcOutputData[h * outWidth * 3 + w * 3] * 255);
+                            int g = (int) (hwcOutputData[h * outWidth * 3 + w * 3 + 1] * 255);
+                            int b = (int) (hwcOutputData[h * outWidth * 3 + w * 3 + 2] * 255);
 //                                int r = (int) (hwcOutputData[h * outWidth * 3 + w * 3] );
 //                                int g = (int) (hwcOutputData[h * outWidth * 3 + w * 3 + 1] );
 //                                int b = (int) (hwcOutputData[h * outWidth * 3 + w * 3 + 2] );
-                                r = r > 255 ? 255 : (Math.max(r, 0));
-                                g = g > 255 ? 255 : (Math.max(g, 0));
-                                b = b > 255 ? 255 : (Math.max(b, 0));
-                                // ARGB
-                                outPixels[yp++] = 0xff000000 | (r << 16 & 0xff0000) | (g << 8 & 0xff00) | (b & 0xff);
-                            }
+                            r = r > 255 ? 255 : (Math.max(r, 0));
+                            g = g > 255 ? 255 : (Math.max(g, 0));
+                            b = b > 255 ? 255 : (Math.max(b, 0));
+                            // ARGB
+                            outPixels[yp++] = 0xff000000 | (r << 16 & 0xff0000) | (g << 8 & 0xff00) | (b & 0xff);
                         }
+                    }
 //                        Bitmap srBitmap = Bitmap.createBitmap(tf_output_shape[1],tf_output_shape[0], Bitmap.Config.ARGB_8888);
 //                        srBitmap.setPixels(outPixels,0,tf_output_shape[1],0,0,tf_output_shape[1],tf_output_shape[0]);
 
-                        end_time = System.currentTimeMillis();
-                        cost_time = end_time - start_time;
-                        Log.i(time_tag , "inference post_process time: " + cost_time + " ms");
-                        // TODO：从bisr队列中获取bi放大的bitmap，然后将outPixels填充到对应的位置中（不知道能不能直接填充）
-                        Bitmap outBitmap = biSROutputQueue.take();
+                    end_time = System.currentTimeMillis();
+                    cost_time = end_time - start_time;
+                    Log.i(time_tag , "inference post_process time: " + cost_time + " ms");
+                    // TODO：从bisr队列中获取bi放大的bitmap，然后将outPixels填充到对应的位置中（不知道能不能直接填充）
+                    Bitmap outBitmap = biSROutputQueue.take();
 //                        renderer.set_bi_Bitmap(outBitmap);
 //                        renderer.set_sr_bitmap(srBitmap);
 //                        renderer.updateSurface_Flag = true;
-                        start_time = System.currentTimeMillis();
-                        int bitmapWidth = outBitmap.getWidth();
-                        int bitmapHeight = outBitmap.getHeight();
+                    start_time = System.currentTimeMillis();
+                    int bitmapWidth = outBitmap.getWidth();
+                    int bitmapHeight = outBitmap.getHeight();
 //                        Log.i(mytag, "run: " + bitmapWidth +  ' ' + bitmapHeight); // 3840 2160
 //                        Log.i(mytag , "x: "+tile_index[0] * tf_output_shape[0] + " width: "+tf_output_shape[0] + " bitmap_width: "+ outBitmap.getWidth());
-                        // stride 要填写要填入的patch的width值
-                        // 这句话是把sr patch拷贝到outBitmap对应的位置，暂时注释掉
-                        outBitmap.setPixels(outPixels , 0 , tf_output_shape[0] , tile_index[0] * tf_output_shape[0]  , tile_index[1] * tf_output_shape[1]  , tf_output_shape[0] , tf_output_shape[1]);
+                    // stride 要填写要填入的patch的width值
+                    // 这句话是把sr patch拷贝到outBitmap对应的位置，暂时注释掉
+                    outBitmap.setPixels(outPixels , 0 , tf_output_shape[0] , tile_index[0] * tf_output_shape[0]  , tile_index[1] * tf_output_shape[1]  , tf_output_shape[0] , tf_output_shape[1]);
 //                        outBitmap.setPixels(outPixels , 0 , tf_output_shape[0] , tile_index[0] * tf_output_shape[0] , tile_index[1] * tf_output_shape[1] , tf_output_shape[0] , tf_output_shape[1]);
-
-                        // 这里有问题-> 单独把这部分的东西显示出来看看（这里推理完是没错的，应该就是setpixels的问题 ）
+                    // 这里有问题-> 单独把这部分的东西显示出来看看（这里推理完是没错的，应该就是setpixels的问题 ）
 //                        Bitmap inference_bitmap = Bitmap.createBitmap(3840 , 2160  , Bitmap.Config.ARGB_8888);
 //                        inference_bitmap.setPixels(outPixels , 0 , 960 , 0,0,960 , 540);
-                        // ARGB数据写入到bitmap中
+                    // ARGB数据写入到bitmap中
 //                        Bitmap outBitmap = Bitmap.createBitmap(outWidth, outHeight, Bitmap.Config.ARGB_8888);
 //                        outBitmap.setPixels(outPixels, 0, outWiddth, 0, 0, outWidth, outHeight);
 
-                        // 对bitmap数据进行后处理
-                        Matrix matrix = new Matrix();
-                        if (!isPICO) { // 在手机显示的话：需要旋转成竖屏
-                            matrix.postRotate( 0);
-                        }
+                    // 对bitmap数据进行后处理
+                    Matrix matrix = new Matrix();
+                    if (!isPICO) { // 在手机显示的话：需要旋转成竖屏
+                        matrix.postRotate( 0);
+                    }
 //                        Bitmap postTransformImageBitmap = Bitmap.createBitmap(outBitmap, 0, 0, video_output_shape.getWidth(), video_output_shape.getHeight(), matrix, false);
 //                        Bitmap postTransformImageBitmap = Bitmap.createBitmap(outBitmap, 0, 0, outBitmap.getWidth(),outBitmap.getHeight(), matrix, false);
 
-                        // 使用创建的 Handler 对象，将一个任务（更新 ImageView 的图像）发送到主线程执行。
-                        // tips：在 Android 中，所有的 UI 操作必须在主线程（UI 线程）上进行。如果你在后台线程（如异步任务或网络操作线程）上尝试更新 UI，会导致应用崩溃。这是因为 Android 的 UI 组件不是线程安全的。
-                        // 只有主线程可以更新视图
-                        handler.post(()-> imageView.setImageBitmap(outBitmap));
+                    // 使用创建的 Handler 对象，将一个任务（更新 ImageView 的图像）发送到主线程执行。
+                    // tips：在 Android 中，所有的 UI 操作必须在主线程（UI 线程）上进行。如果你在后台线程（如异步任务或网络操作线程）上尝试更新 UI，会导致应用崩溃。这是因为 Android 的 UI 组件不是线程安全的。
+                    // 只有主线程可以更新视图
+                    // handler是主线程的handler，post传入一个Runnable对象，每调用一次post就会给主线程发一个Runnable对象，然后主线程把这个Runnable对象调用一次run()方法
+//                    Bitmap showBitmap = outBitmap.copy(outBitmap.getConfig(), false);
+                    handler.post(()-> imageView.setImageBitmap(outBitmap));
 //                        handler.post(()-> surfaceView.s .setImageBitmap(postTransformImageBitmap));
-                        end_time = System.currentTimeMillis();
-                        cost_time = end_time - start_time;
+                    end_time = System.currentTimeMillis();
+                    cost_time = end_time - start_time;
 //                        long endTime = System.currentTimeMillis();
 //                        long costTime = endTime - startTime;
-                        updateTextView(Long.toString(cost_time) + "ms");
-                        Log.i(time_tag, "concat and show time : " + cost_time + " ms");
-                    }
-                    catch (InterruptedException e) {
-                        Log.e("Error Exception", "MainActivity error: " + e.getMessage() + e.toString());
-                        Thread.currentThread().interrupt();
-                        break;
-                    }
+                    updateTextView(Long.toString(cost_time) + "ms");
+                    Log.i(time_tag, "concat and show time : " + cost_time + " ms");
+                }
+                catch (InterruptedException e) {
+                    Log.e("Error Exception", "MainActivity error: " + e.getMessage() + e.toString());
+                    Thread.currentThread().interrupt();
+                    break;
                 }
             }
         }).start();

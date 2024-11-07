@@ -1,5 +1,9 @@
 <resources>
     <string name="app_name">ffmpegVideoPlayer</string>
     <string name="video_url">rtsp://172.18.233.92:8554/video</string>
-<!--    <string name="video_url">rtsp://192.168.137.1:8554/video</string>-->
+    <string name="video_quality">medium</string>
+    <integer name="queue_length">16</integer>
+    <integer name="output_width">3840</integer>
+    <integer name="output_height">2160</integer>
+    <integer name="output_framerate">30</integer>
 </resources>

@@ -67,10 +67,10 @@ public class InferenceTFLite {
 
     ImageProcessor imageProcessor;
 
-    // 用于保存可重用输出 TensorBuffer 的成员变量
-    private TensorBuffer hwcOutputTensorBuffer;
-    // 用于跟踪创建 hwcOutputTensorBuffer 的形状，以处理动态 tf_output_shape
-    private int[] currentTfOutputShapeForBuffer = null;
+//    // 用于保存可重用输出 TensorBuffer 的成员变量
+//    private TensorBuffer hwcOutputTensorBuffer;
+//    // 用于跟踪创建 hwcOutputTensorBuffer 的形状，以处理动态 tf_output_shape
+//    private int[] currentTfOutputShapeForBuffer = null;
 
 
     public void initialModel(Context activity) { // 参数名 'activity' 保持不变，尽管它是一个 Context
@@ -79,7 +79,7 @@ public class InferenceTFLite {
             ByteBuffer tfliteModel = FileUtil.loadMappedFile(activity, MODEL_FILE);
             tflite = new Interpreter(tfliteModel, options);
 
-            // hwcOutputTensorBuffer 不再在此处创建。它将在 superResolution 中按需创建。
+            // hwcOutputTensorBuffer 不再作为成员变量存在。它将在 superResolution 中按需创建。
 
             if (IS_INT8) {
                 imageProcessor = new ImageProcessor.Builder()
@@ -112,52 +112,32 @@ public class InferenceTFLite {
     public TensorBuffer superResolution(TensorImage modelInput, int[] tf_output_shape) {
         // tf_output_shape 假定为超分辨率图像的 [高度, 宽度]。
         // 原始代码将 output_size 构造为: {1, tf_output_shape[1], tf_output_shape[0], 3}
-        // This implies an NWHC format: [Batch, Width, Height, Channels=3]
+        // 这意味着 NWHC 格式：[批次, 宽度, 高度, 通道数=3]
         // 我们将坚持这种解释以保持原始行为。
         int[] bufferShape = new int[]{1, tf_output_shape[1], tf_output_shape[0], 3};
 
         if (tflite == null) {
             Log.e(TAG, "TFLite interpreter is null. Cannot run superResolution.");
-            // Attempt to return a buffer consistent with previous logic if it was ever created,
-            // 或者如果在此错误状态下调用（尽管它不会被填充），则创建一个新的。
-            if (hwcOutputTensorBuffer == null || !Arrays.equals(this.currentTfOutputShapeForBuffer, tf_output_shape)) {
-                Log.w(TAG, "Creating a fallback output buffer because TFLite is null. Shape: " + Arrays.toString(bufferShape));
-                // 如果 tflite 对象不可用以获取实际数据类型，则回退到 FLOAT32
-                this.hwcOutputTensorBuffer = TensorBuffer.createFixedSize(bufferShape, DataType.FLOAT32);
-                this.currentTfOutputShapeForBuffer = tf_output_shape.clone(); // tf_output_shape 是 [高,宽]
-            }
-            return hwcOutputTensorBuffer;
+            // 如果 tflite 对象不可用以获取实际数据类型，则回退到 FLOAT32
+            return TensorBuffer.createFixedSize(bufferShape, DataType.FLOAT32);
         }
 
-        // 检查输出缓冲区是否需要由于形状更改或首次运行而（重新）创建
-        if (hwcOutputTensorBuffer == null || !Arrays.equals(this.currentTfOutputShapeForBuffer, tf_output_shape)) {
-            DataType outputDataType = tflite.getOutputTensor(0).dataType();
-            // int[] actualModelOutputShape = tflite.getOutputTensor(0).shape();
-            // Log.d(TAG, "Actual model output shape from TFLite: " + Arrays.toString(actualModelOutputShape));
-            // Log.d(TAG, "Creating buffer with user-provided tf_output_shape interpreted as NWHC: " + Arrays.toString(bufferShape));
-
-            // 确保 bufferShape 尽可能与模型的实际输出尺寸匹配，
-            // 但原始代码将通道硬编码为 3，并使用 tf_output_shape 作为高/宽。
-            // 我们优先匹配原始代码的缓冲区构造逻辑。
-            this.hwcOutputTensorBuffer = TensorBuffer.createFixedSize(bufferShape, outputDataType);
-            this.currentTfOutputShapeForBuffer = tf_output_shape.clone(); // 存储 [高,宽] 对
-            Log.i(TAG, "Created/Recreated hwcOutputTensorBuffer with shape: " +
-                    Arrays.toString(bufferShape) + " and DataType: " + outputDataType);
-        }
+        // 每次都创建一个新的 TensorBuffer 来接收模型输出
+        DataType outputDataType = tflite.getOutputTensor(0).dataType();
+        TensorBuffer outputTensorBuffer = TensorBuffer.createFixedSize(bufferShape, outputDataType);
+        Log.i(TAG, "Created new outputTensorBuffer with shape: " +
+                Arrays.toString(bufferShape) + " and DataType: " + outputDataType);
 
         // 确保在 tflite.run() 之前重置 ByteBuffer
-        // 输入缓冲区
         ByteBuffer inputBuffer = modelInput.getBuffer();
         inputBuffer.rewind();
 
-        // 输出缓冲区
-        ByteBuffer outputBuffer = hwcOutputTensorBuffer.getBuffer();
-        outputBuffer.rewind(); // Reset position to 0
-        // outputBuffer.limit(outputBuffer.capacity()); // Ensure limit is capacity, though createFixedSize should handle this.
+        ByteBuffer outputBuffer = outputTensorBuffer.getBuffer();
+        outputBuffer.rewind(); // 重置位置为 0
 
         tflite.run(inputBuffer, outputBuffer);
 
-        return hwcOutputTensorBuffer;
+        return outputTensorBuffer;
     }
 
 

@@ -35,6 +35,7 @@ import androidx.appcompat.app.AppCompatActivity;
 // import java.io.InputStream; // 未使用
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.atomic.AtomicLong;
 import com.example.ffmpegvideoplayer.analysis.InferenceTFLite;
 import android.util.Size;
 import org.tensorflow.lite.DataType;
@@ -58,11 +59,15 @@ import com.example.ffmpegvideoplayer.analysis.BiTFLite; // 保留，已初始化
 public class MainActivity extends AppCompatActivity {
 
     private static final int QUEUE_CAPACITY = 64;
-    private static BlockingQueue<byte[]> yuvBytesQueue = new ArrayBlockingQueue<>(QUEUE_CAPACITY);
-    private static BlockingQueue<TensorImage> modelInputQueue = new ArrayBlockingQueue<>(QUEUE_CAPACITY);
-    private static BlockingQueue<TensorBuffer> modelOutputQueue = new ArrayBlockingQueue<>(QUEUE_CAPACITY);
-    // private static BlockingQueue<int[]> viewOutQueue = new ArrayBlockingQueue<>(QUEUE_CAPACITY); // 在提供的逻辑中未使用
-    private static BlockingQueue<Bitmap> biSROutputQueue = new ArrayBlockingQueue<>(QUEUE_CAPACITY);
+    private static BlockingQueue<TaggedData<byte[]>> yuvBytesQueue = new ArrayBlockingQueue<>(QUEUE_CAPACITY);
+    private static BlockingQueue<TaggedData<Bitmap>> rgbFrameQueueForTfInput = new ArrayBlockingQueue<>(QUEUE_CAPACITY); // 用于 prepareTfInputLoop
+    private static BlockingQueue<TaggedData<Bitmap>> rgbFrameQueueForUpsample = new ArrayBlockingQueue<>(QUEUE_CAPACITY); // 用于 upsampleLoop
+    private static BlockingQueue<TaggedData<TensorImage>> modelInputQueue = new ArrayBlockingQueue<>(QUEUE_CAPACITY);
+    private static BlockingQueue<TaggedData<TensorBuffer>> modelOutputQueue = new ArrayBlockingQueue<>(QUEUE_CAPACITY);
+    // private static BlockingQueue<TaggedData<int[]>> viewOutQueue = new ArrayBlockingQueue<>(QUEUE_CAPACITY); // 在提供的逻辑中未使用
+    private static BlockingQueue<TaggedData<Bitmap>> biSROutputQueue = new ArrayBlockingQueue<>(QUEUE_CAPACITY);
+
+    private static final AtomicLong frameCounter = new AtomicLong(0); // 全局帧号计数器
 
     private final static String mytag = "MyNativeCode";
     private final static String time_tag = "time";
@@ -109,34 +114,38 @@ public class MainActivity extends AppCompatActivity {
     private BiTFLite biTFLite; // 已初始化，但其推断不在 mainProcess 中
 
     // 可重用位图
-    private Bitmap inputBitmap;        // 用于 YUV->RGB 转换输出（完整帧）
-    private Bitmap model_input_bitmap; // 用于 TFLite 输入（裁剪patch），可重用
-    private Bitmap bicubic_output_bitmap; // 用于 RenderScript 双三次上采样输出（完整帧），可重用
+    // 这些位图现在是线程局部的，不再需要作为 MainActivity 的成员变量
+    // private Bitmap inputBitmap;
+    // private Bitmap model_input_bitmap;
+    // private Bitmap bicubic_output_bitmap;
 
     // 用于 TFLite 输出patch像素的可重用数组
     private int[] sr_patch_pixels;
 
-    // RenderScript 对象
-    private RenderScript mRsYuvToRgb;
-    private Allocation inAllocYuvToRgb;
-    private Allocation outAllocYuvToRgb;
-    private ScriptIntrinsicYuvToRGB scriptYuvToRgb;
+    // RenderScript 对象 (这些现在是线程局部的，不再需要作为 MainActivity 的成员变量)
+    // private RenderScript mRsYuvToRgb;
+    // private Allocation inAllocYuvToRgb;
+    // private Allocation outAllocYuvToRgb;
+    // private ScriptIntrinsicYuvToRGB scriptYuvToRgb;
 
-    private RenderScript mRsResize;
-    private Allocation inAllocResize;
-    private Allocation outAllocResize;
-    private ScriptIntrinsicResize scriptResize;
+    // private RenderScript mRsResize;
+    // private Allocation inAllocResize;
+    // private Allocation outAllocResize;
+    // private ScriptIntrinsicResize scriptResize;
 
     private ImageProcessor imageProcessorTFLiteInput;
 
     // 线程管理
     private volatile boolean processingRunning = true;
-    private Thread preProcessThread;
+    private Thread yuvToRgbThread;
+    private Thread prepareTfInputThread;
+    private Thread upsampleThread;
     private Thread inferenceThread;
     private Thread afterProcessThread;
 
-    private Canvas modelInputCanvas; // 用于在 model_input_bitmap 上绘制裁剪区域
-    private Paint modelInputPaint;   // 可选，用于绘制选项
+    // 这些现在是线程局部的，不再需要作为 MainActivity 的成员变量
+    // private Canvas modelInputCanvas;
+    // private Paint modelInputPaint;
 
     private void initModel() {
         try {
@@ -177,21 +186,24 @@ public class MainActivity extends AppCompatActivity {
         frameSizeTextView = findViewById(R.id.frame_size);
         fpsTextView = findViewById(R.id.inference_time);
 
-        // 初始化可重用位图
+        // 初始化可重用位图 (这些现在是线程局部的，不再需要在此处初始化)
+        /*
         inputBitmap = Bitmap.createBitmap(VIDEO_INPUT_W, VIDEO_INPUT_H, Bitmap.Config.ARGB_8888);
         model_input_bitmap = Bitmap.createBitmap(TF_INPUT_W, TF_INPUT_H, Bitmap.Config.ARGB_8888);
         bicubic_output_bitmap = Bitmap.createBitmap(video_output_shape.getWidth(), video_output_shape.getHeight(), Bitmap.Config.ARGB_8888);
 
-        // 用于 model_input_bitmap 的 Canvas
+        // 用于 model_input_bitmap 的 Canvas (这些现在是线程局部的，不再需要在此处初始化)
         modelInputCanvas = new Canvas(model_input_bitmap);
         modelInputPaint = new Paint(Paint.FILTER_BITMAP_FLAG); // 如果缩小，用于质量，尽管此处裁剪是 1:1
+        */
 
         // 初始化 SR patch的可重用像素数组
         // 这将根据实际模型输出进行大小调整，但目前使用配置的 TF_OUTPUT 尺寸
         sr_patch_pixels = new int[TF_OUTPUT_W * TF_OUTPUT_H];
 
 
-        // 初始化 RenderScript 用于 YUV 到 RGB 转换
+        // 初始化 RenderScript 用于 YUV 到 RGB 转换 (这些现在是线程局部的，不再需要在此处初始化)
+        /*
         mRsYuvToRgb = RenderScript.create(getApplicationContext());
         Type.Builder yuvTypeBuilder = new Type.Builder(mRsYuvToRgb, Element.U8(mRsYuvToRgb))
                 .setX(VIDEO_INPUT_W).setY(VIDEO_INPUT_H).setYuvFormat(ImageFormat.YV12); // 假设 JNI 提供 YV12 格式
@@ -202,11 +214,12 @@ public class MainActivity extends AppCompatActivity {
         outAllocYuvToRgb = Allocation.createTyped(mRsYuvToRgb, rgbaTypeBuilder.create(), Allocation.USAGE_SCRIPT);
         scriptYuvToRgb = ScriptIntrinsicYuvToRGB.create(mRsYuvToRgb, Element.RGBA_8888(mRsYuvToRgb));
 
-        // 初始化 RenderScript 用于双三次缩放
+        // 初始化 RenderScript 用于双三次缩放 (这些现在是线程局部的，不再需要在此处初始化)
         mRsResize = RenderScript.create(getApplicationContext());
         inAllocResize = Allocation.createFromBitmap(mRsResize, inputBitmap); // 缩放的输入是完整的 RGB 帧
         outAllocResize = Allocation.createFromBitmap(mRsResize, bicubic_output_bitmap); // 输出是大的双三次上采样位图
         scriptResize = ScriptIntrinsicResize.create(mRsResize);
+        */
 
         // TFLite 输入的 ImageProcessor（此处无 ResizeOp，因为 model_input_bitmap 已是正确大小）
         imageProcessorTFLiteInput = new ImageProcessor.Builder()
@@ -231,8 +244,14 @@ public class MainActivity extends AppCompatActivity {
     public void mainProcess() {
         processingRunning = true; // 在启动线程前设置标志
 
-        preProcessThread = new Thread(this::preProcessLoop, "PreProcessThread");
-        preProcessThread.start();
+        yuvToRgbThread = new Thread(this::yuvToRgbLoop, "YuvToRgbThread");
+        yuvToRgbThread.start();
+
+        prepareTfInputThread = new Thread(this::prepareTfInputLoop, "PrepareTfInputThread");
+        prepareTfInputThread.start();
+
+        upsampleThread = new Thread(this::upsampleLoop, "UpsampleThread");
+        upsampleThread.start();
 
         inferenceThread = new Thread(this::inferenceLoop, "InferenceThread");
         inferenceThread.start();
@@ -241,101 +260,225 @@ public class MainActivity extends AppCompatActivity {
         afterProcessThread.start();
     }
 
-    private void preProcessLoop() {
-        Log.i(mytag, "PreProcessing Loop Started");
-        Rect srcRect = new Rect();
-        Rect dstRect = new Rect(0, 0, TF_INPUT_W, TF_INPUT_H);
+    private void yuvToRgbLoop() {
+        Log.i(mytag, "YUV to RGB Loop Started");
+        // 每个线程创建独立的 RenderScript 实例
+        RenderScript threadRsYuvToRgb = RenderScript.create(getApplicationContext());
+        Type.Builder yuvTypeBuilder = new Type.Builder(threadRsYuvToRgb, Element.U8(threadRsYuvToRgb))
+                .setX(VIDEO_INPUT_W).setY(VIDEO_INPUT_H).setYuvFormat(ImageFormat.YV12);
+        Allocation inAlloc = Allocation.createTyped(threadRsYuvToRgb, yuvTypeBuilder.create(), Allocation.USAGE_SCRIPT);
+        Type.Builder rgbaTypeBuilder = new Type.Builder(threadRsYuvToRgb, Element.RGBA_8888(threadRsYuvToRgb))
+                .setX(VIDEO_INPUT_W).setY(VIDEO_INPUT_H);
+        Allocation outAlloc = Allocation.createTyped(threadRsYuvToRgb, rgbaTypeBuilder.create(), Allocation.USAGE_SCRIPT);
+        ScriptIntrinsicYuvToRGB scriptYuvToRgb = ScriptIntrinsicYuvToRGB.create(threadRsYuvToRgb, Element.RGBA_8888(threadRsYuvToRgb));
+
+        // 线程局部位图对象
+        Bitmap threadLocalInputBitmap = Bitmap.createBitmap(VIDEO_INPUT_W, VIDEO_INPUT_H, Bitmap.Config.ARGB_8888);
 
         while (processingRunning) {
             try {
-                long startTimeFullLoop, endTimeFullLoop, costTimeFullLoop;
-                startTimeFullLoop = System.currentTimeMillis();
+                TaggedData<byte[]> taggedYuvData = yuvBytesQueue.take(); // 如果队列为空则阻塞
+                byte[] yuvData = taggedYuvData.getData();
+                long frameNum = taggedYuvData.getFrameNumber();
+                Log.i(mytag, "YUV to RGB Loop: Processing frame " + frameNum);
 
-                byte[] yuvData = yuvBytesQueue.take(); // 如果队列为空则阻塞
-
-                // 1. 使用 RenderScript 将 YUV 转换为 RGB
                 long startTime = System.currentTimeMillis();
-                inAllocYuvToRgb.copyFrom(yuvData);
-                scriptYuvToRgb.setInput(inAllocYuvToRgb);
-                scriptYuvToRgb.forEach(outAllocYuvToRgb);
-                outAllocYuvToRgb.copyTo(inputBitmap); // inputBitmap 现在包含完整的 RGB 帧
-                long endTime = System.currentTimeMillis();
-                Log.i(time_tag, "preProcess - YUV to RGB: " + (endTime - startTime) + " ms");
+                inAlloc.copyFrom(yuvData);
+                scriptYuvToRgb.setInput(inAlloc);
+                scriptYuvToRgb.forEach(outAlloc);
+                outAlloc.copyTo(threadLocalInputBitmap); // 转换为 RGB
 
-                // 2. 准备 TFLite 模型输入（裁剪和处理）
-                startTime = System.currentTimeMillis();
+                long endTime = System.currentTimeMillis();
+                Log.i(time_tag, "YUV to RGB: " + (endTime - startTime) + " ms");
+
+                // 将转换后的 RGB 位图的副本放入两个队列
+                // 必须创建副本，因为两个消费者线程会独立使用它们
+                Bitmap rgbFrameCopy = threadLocalInputBitmap.copy(threadLocalInputBitmap.getConfig(), false);
+                rgbFrameQueueForUpsample.put(new TaggedData<>(rgbFrameCopy.copy(threadLocalInputBitmap.getConfig(), false), frameNum));
+                rgbFrameQueueForTfInput.put(new TaggedData<>(rgbFrameCopy.copy(threadLocalInputBitmap.getConfig(), false), frameNum));
+
+
+            } catch (InterruptedException e) {
+                Log.w(mytag, "YUV to RGB Loop interrupted. Exiting.");
+                Thread.currentThread().interrupt();
+                break;
+            } catch (Exception e) {
+                Log.e(mytag, "Error in YUV to RGB Loop: " + e.getMessage(), e);
+            }
+        }
+        // 释放 RenderScript 资源
+        if (inAlloc != null) inAlloc.destroy();
+        if (outAlloc != null) outAlloc.destroy();
+        if (scriptYuvToRgb != null) scriptYuvToRgb.destroy();
+        if (threadRsYuvToRgb != null) threadRsYuvToRgb.destroy();
+        if (threadLocalInputBitmap != null && !threadLocalInputBitmap.isRecycled()) threadLocalInputBitmap.recycle();
+        Log.i(mytag, "YUV to RGB Loop Finished");
+    }
+
+    private void prepareTfInputLoop() {
+        Log.i(mytag, "Prepare TFLite Input Loop Started");
+        Rect srcRect = new Rect();
+        Rect dstRect = new Rect(0, 0, TF_INPUT_W, TF_INPUT_H);
+
+        // 线程局部位图对象
+        Bitmap threadLocalModelInputBitmap = Bitmap.createBitmap(TF_INPUT_W, TF_INPUT_H, Bitmap.Config.ARGB_8888);
+        Canvas threadLocalModelInputCanvas = new Canvas(threadLocalModelInputBitmap);
+        Paint threadLocalModelInputPaint = new Paint(Paint.FILTER_BITMAP_FLAG);
+
+        while (processingRunning) {
+            try {
+                long loopStart = System.currentTimeMillis();
+
+                long takeStart = System.currentTimeMillis();
+                TaggedData<Bitmap> taggedRgbFrameForTfInput = rgbFrameQueueForTfInput.take(); // 从 YUV 转 RGB 队列获取，用于 TFLite 输入
+                Bitmap rgbFrame = taggedRgbFrameForTfInput.getData();
+                long frameNum = taggedRgbFrameForTfInput.getFrameNumber();
+                long takeEnd = System.currentTimeMillis();
+                Log.i(mytag, "Prepare TFLite Input Loop: Processing frame " + frameNum);
+
+                long processingStart = System.currentTimeMillis();
                 int cropX = tile_index[0] * TF_INPUT_W;
                 int cropY = tile_index[1] * TF_INPUT_H;
 
-                // 确保裁剪区域在 inputBitmap 的边界内
                 if (cropX + TF_INPUT_W > VIDEO_INPUT_W || cropY + TF_INPUT_H > VIDEO_INPUT_H) {
                     Log.e(mytag, "Crop dimensions exceed inputBitmap bounds. Skipping frame for TFLite.");
                     // 可能会放置一个占位符或跳过将数据放入 modelInputQueue
                     // 目前，我们将继续，但这可能会在 createBitmap/drawBitmap 失败时崩溃
+                    continue; // 跳过当前帧
                 }
 
                 srcRect.set(cropX, cropY, cropX + TF_INPUT_W, cropY + TF_INPUT_H);
-                modelInputCanvas.drawBitmap(inputBitmap, srcRect, dstRect, modelInputPaint); // model_input_bitmap 现在包含裁剪后的patch
+                threadLocalModelInputCanvas.drawBitmap(rgbFrame, srcRect, dstRect, threadLocalModelInputPaint); // 裁剪到线程局部位图
 
-                TensorImage modelInputTensor = new TensorImage(DataType.FLOAT32); // 假设是 FLOAT32，如果模型是量化的则调整
-                modelInputTensor.load(model_input_bitmap);
+                Bitmap threadLocalModelInputBitmap1 = threadLocalModelInputBitmap.copy(threadLocalModelInputBitmap.getConfig(), false );
+
+                TensorImage modelInputTensor = new TensorImage(DataType.FLOAT32);
+                modelInputTensor.load(threadLocalModelInputBitmap1);
                 modelInputTensor = imageProcessorTFLiteInput.process(modelInputTensor);
-                endTime = System.currentTimeMillis();
-                Log.i(time_tag, "preProcess - Create TFLite Input: " + (endTime - startTime) + " ms");
+                long processingEnd = System.currentTimeMillis();
 
-                modelInputQueue.put(modelInputTensor); // 如果队列已满则阻塞
+                // 记录详细时间信息
+                long loopEnd = System.currentTimeMillis();
+                Log.i(time_tag, "TFLite Input - Total: " + (loopEnd - loopStart) + "ms | Take: " + (takeEnd - takeStart) + "ms | Processing: " + (processingEnd - processingStart) + "ms");
 
-                // 3. 使用 RenderScript 对图像的其余部分执行双三次上采样
-                startTime = System.currentTimeMillis();
-                // Update inAllocResize if inputBitmap content changed and it's not auto-synced.
-                // createFromBitmap 将 Allocation 链接到 Bitmap。如果 Bitmap 像素更改，
-                // 如果链接不是实时的，inAllocResize 需要被通知或重新创建。
-                // 为了安全起见，或者如果出现问题，可以重新复制：
-                inAllocResize.copyFrom(inputBitmap); // Ensure fresh data from inputBitmap
-                scriptResize.setInput(inAllocResize);
-                scriptResize.forEach_bicubic(outAllocResize);
-                outAllocResize.copyTo(bicubic_output_bitmap); // bicubic_output_bitmap 现在包含完整的上采样图像
-                endTime = System.currentTimeMillis();
-                Log.i(time_tag, "preProcess - Bicubic Upscale: " + (endTime - startTime) + " ms");
-
-                // 将 bicubic_output_bitmap 的副本放入队列
-                // 如果 afterProcessLoop 修改了它接收到的位图，这很重要
-                Bitmap biSrOutputCopy = bicubic_output_bitmap.copy(bicubic_output_bitmap.getConfig(), true);
-                biSROutputQueue.put(biSrOutputCopy); // 如果队列已满则阻塞
-
-                endTimeFullLoop = System.currentTimeMillis();
-                costTimeFullLoop = endTimeFullLoop - startTimeFullLoop;
-                Log.i(time_tag, "preProcess - Full Loop Time: " + costTimeFullLoop + " ms. Queue sizes: YUV=" + yuvBytesQueue.size() + " ModelIn=" + modelInputQueue.size() + " BiSR=" + biSROutputQueue.size());
-
+                modelInputQueue.put(new TaggedData<>(modelInputTensor, frameNum)); // 放入 TFLite 输入队列
 
             } catch (InterruptedException e) {
-                Log.w(mytag, "PreProcessing Loop interrupted. Exiting.");
+                Log.w(mytag, "Prepare TFLite Input Loop interrupted. Exiting.");
                 Thread.currentThread().interrupt();
                 break;
             } catch (Exception e) {
-                Log.e(mytag, "Error in PreProcessing Loop: " + e.getMessage(), e);
-                // 根据错误严重性继续循环或中断
+                Log.e(mytag, "Error in Prepare TFLite Input Loop: " + e.getMessage(), e);
             }
         }
-        Log.i(mytag, "PreProcessing Loop Finished");
+        if (threadLocalModelInputBitmap != null && !threadLocalModelInputBitmap.isRecycled()) threadLocalModelInputBitmap.recycle();
+        Log.i(mytag, "Prepare TFLite Input Loop Finished");
     }
 
+    private void upsampleLoop() {
+        Log.i(mytag, "Upsample Loop Started");
+        // 每个线程创建独立的 RenderScript 实例
+        RenderScript threadRsResize = RenderScript.create(getApplicationContext());
+        // 线程局部位图对象
+        Bitmap threadLocalBicubicOutputBitmap = Bitmap.createBitmap(video_output_shape.getWidth(), video_output_shape.getHeight(), Bitmap.Config.ARGB_8888);
+
+        // RenderScript Allocation
+        // 输出 Allocation
+        Allocation outAlloc = Allocation.createFromBitmap(threadRsResize, threadLocalBicubicOutputBitmap);
+        // 输入 Allocation - 预先创建，因为输入尺寸 (rgbFrame) 已知
+        // rgbFrame 的尺寸是 VIDEO_INPUT_W, VIDEO_INPUT_H
+        Type.Builder rgbaInputTypeBuilder = new Type.Builder(threadRsResize, Element.RGBA_8888(threadRsResize))
+                .setX(VIDEO_INPUT_W)
+                .setY(VIDEO_INPUT_H);
+        Allocation inAlloc = Allocation.createTyped(threadRsResize, rgbaInputTypeBuilder.create(), Allocation.USAGE_SCRIPT);
+
+        ScriptIntrinsicResize scriptResize = ScriptIntrinsicResize.create(threadRsResize);
+        scriptResize.setInput(inAlloc); // 设置一次输入 Allocation
+
+        while (processingRunning) {
+            try {
+                long taketime = System.currentTimeMillis();
+                TaggedData<Bitmap> taggedRgbFrameForUpsample = rgbFrameQueueForUpsample.take(); // 从 YUV 转 RGB 队列获取，用于上采样
+                Bitmap rgbFrame = taggedRgbFrameForUpsample.getData();
+                long frameNum = taggedRgbFrameForUpsample.getFrameNumber();
+
+                // 防御性检查，确保 rgbFrame 与 inAlloc 尺寸匹配
+                if (rgbFrame == null || rgbFrame.getWidth() != VIDEO_INPUT_W || rgbFrame.getHeight() != VIDEO_INPUT_H) {
+                    Log.e(mytag, "Upsample Loop: Received frame " + frameNum + " with unexpected dimensions or null. Expected " +
+                            VIDEO_INPUT_W + "x" + VIDEO_INPUT_H + ", got " +
+                            (rgbFrame != null ? rgbFrame.getWidth() + "x" + rgbFrame.getHeight() : "null") + ". Skipping.");
+                    if (rgbFrame != null && !rgbFrame.isRecycled()) { // 如果不需要，则回收传入的位图
+                        // rgbFrame.recycle(); // 注意：这个rgbFrame是从队列中获取的，其他线程可能也在使用它的副本。
+                        // 这里的回收需要小心，确保这个实例不会再被其他地方使用。
+                        // 根据 yuvToRgbLoop 的逻辑，放入队列的是副本，所以理论上这里回收是安全的，
+                        // 但要非常确定这个Bitmap实例不会被其他地方引用。
+                        // 为安全起见，暂时不回收，依赖队列和后续处理阶段的Bitmap管理。
+                    }
+                    continue;
+                }
+
+                Log.i(mytag, "Upsample Loop: Processing frame " + frameNum);
+
+                long startTime = System.currentTimeMillis();
+                // 使用 copyFrom 更新预先创建的 inAlloc 的内容
+                inAlloc.copyFrom(rgbFrame);
+                // scriptResize.setInput(inAlloc); // 已经在循环外设置
+
+                scriptResize.forEach_bicubic(outAlloc);
+                outAlloc.copyTo(threadLocalBicubicOutputBitmap); // 上采样结果
+
+                // 不再需要在循环内销毁临时的输入 Allocation
+                // inAlloc.destroy(); // 已移到循环外
+
+                long endTime = System.currentTimeMillis();
+                Log.i(time_tag, "Bicubic Upscale: " + (endTime - startTime) + " ms" + " (take time: " + (startTime - taketime) + " ms)");
+
+                // 将上采样结果的副本放入队列，因为 afterProcessLoop 会修改它
+                Bitmap biSrOutputCopy = threadLocalBicubicOutputBitmap.copy(threadLocalBicubicOutputBitmap.getConfig(), true);
+                biSROutputQueue.put(new TaggedData<>(biSrOutputCopy, frameNum)); // 放入上采样结果队列
+
+            } catch (InterruptedException e) {
+                Log.w(mytag, "Upsample Loop interrupted. Exiting.");
+                Thread.currentThread().interrupt();
+                break;
+            } catch (Exception e) {
+                Log.e(mytag, "Error in Upsample Loop: " + e.getMessage(), e);
+            }
+        }
+        // 释放 RenderScript 资源
+        if (inAlloc != null) inAlloc.destroy(); // 在此处销毁预先创建的 inAlloc
+        if (outAlloc != null) outAlloc.destroy();
+        if (scriptResize != null) scriptResize.destroy();
+        if (threadRsResize != null) threadRsResize.destroy();
+        if (threadLocalBicubicOutputBitmap != null && !threadLocalBicubicOutputBitmap.isRecycled()) {
+            threadLocalBicubicOutputBitmap.recycle();
+        }
+        Log.i(mytag, "Upsample Loop Finished");
+    }
     private void inferenceLoop() {
         Log.i(mytag, "Inference Loop Started");
         while (processingRunning) {
             try {
-                TensorImage modelInput = modelInputQueue.take(); // 如果队列为空则阻塞
+                long loopStart = System.currentTimeMillis();
 
-                long startTime = System.currentTimeMillis();
+                long takeStart = System.currentTimeMillis();
+                TaggedData<TensorImage> taggedModelInput = modelInputQueue.take(); // 如果队列为空则阻塞
+                TensorImage modelInput = taggedModelInput.getData();
+                long frameNum = taggedModelInput.getFrameNumber();
+                long takeEnd = System.currentTimeMillis();
+                Log.i(mytag, "Inference Loop: Processing frame " + frameNum);
+
+                long inferenceStart = System.currentTimeMillis();
                 // 将 TF_OUTPUT_W 和 TF_OUTPUT_H 传递给 superResolution
                 // InferenceTFLite 需要 [宽度, 高度] 作为其 tf_output_shape 参数
                 TensorBuffer modelOutput = srTFLite.superResolution(modelInput, TF_OUTPUT_SHAPE);
-                long endTime = System.currentTimeMillis();
-                Log.i(time_tag, "Inference - SR Time: " + (endTime - startTime) + " ms");
-                // Log.i(mytag, "Input: " + modelInput.getWidth() + "x" + modelInput.getHeight());
-                // Log.i(mytag, "Output shape: " + Arrays.toString(modelOutput.getShape()));
+                long inferenceEnd = System.currentTimeMillis();
 
-                modelOutputQueue.put(modelOutput); // 如果队列已满则阻塞
+                // 记录详细时间信息
+                long loopEnd = System.currentTimeMillis();
+                Log.i(time_tag, "Inference Loop - Total: " + (loopEnd - loopStart) + "ms | Take: " + (takeEnd - takeStart) + "ms | Inference: " + (inferenceEnd - inferenceStart) + "ms");
+
+                modelOutputQueue.put(new TaggedData<>(modelOutput, frameNum)); // 如果队列已满则阻塞
 
             } catch (InterruptedException e) {
                 Log.w(mytag, "Inference Loop interrupted. Exiting.");
@@ -358,12 +501,24 @@ public class MainActivity extends AppCompatActivity {
 
         while (processingRunning) {
             try {
-                long startTimeFullLoop = System.currentTimeMillis();
-                TensorBuffer hwcOutputTensorBuffer = modelOutputQueue.take(); // 如果队列为空则阻塞
-                Bitmap bicubicBaseBitmap = biSROutputQueue.take(); // 如果队列为空则阻塞
+                long loopStart = System.currentTimeMillis();
+
+                long takeStart = System.currentTimeMillis();
+                TaggedData<Bitmap> taggedBicubicBaseBitmap = biSROutputQueue.take(); // 如果队列为空则阻塞
+                Bitmap bicubicBaseBitmap = taggedBicubicBaseBitmap.getData();
+                long frameNumBiSR = taggedBicubicBaseBitmap.getFrameNumber();
+                long takeMiddle = System.currentTimeMillis();
+                TaggedData<TensorBuffer> taggedHwcOutputTensorBuffer = modelOutputQueue.take(); // 如果队列为空则阻塞
+                TensorBuffer hwcOutputTensorBuffer = taggedHwcOutputTensorBuffer.getData();
+                long frameNumModelOutput = taggedHwcOutputTensorBuffer.getFrameNumber();
+                long takeEnd = System.currentTimeMillis();
+                if (frameNumBiSR != frameNumModelOutput) {
+                    Log.w(mytag, "AfterProcess Loop: Mismatched frame numbers! BiSR: " + frameNumBiSR + ", ModelOutput: " + frameNumModelOutput);
+                }
+                Log.i(mytag, "AfterProcess Loop: Processing frame " + frameNumBiSR);
 
                 // 1. 将 TFLite TensorBuffer 转换为 ARGB int[] patch
-                long startTime = System.currentTimeMillis();
+                long tensorProcessingStart = System.currentTimeMillis();
                 float[] hwcOutputData = hwcOutputTensorBuffer.getFloatArray();
 
                 // 从张量缓冲区获取实际尺寸（如果模型一致，应与 TF_OUTPUT_W、TF_OUTPUT_H 匹配）
@@ -399,17 +554,16 @@ public class MainActivity extends AppCompatActivity {
                         int g = (int) (hwcOutputData[g_idx] * 255f);
                         int b = (int) (hwcOutputData[b_idx] * 255f);
 
-                        r = Math.max(0, Math.min(255, r));
-                        g = Math.max(0, Math.min(255, g));
-                        b = Math.max(0, Math.min(255, b));
+//                        r = Math.max(0, Math.min(255, r));
+//                        g = Math.max(0, Math.min(255, g));
+//                        b = Math.max(0, Math.min(255, b));
                         sr_patch_pixels[yp++] = 0xFF000000 | (r << 16) | (g << 8) | b;
                     }
                 }
-                long endTime = System.currentTimeMillis();
-                Log.i(time_tag, "afterProcess - Tensor to ARGB: " + (endTime - startTime) + " ms");
+                long tensorProcessingEnd = System.currentTimeMillis();
 
                 // 2. 将 SR patch放置在双三次上采样的基础图像上
-                startTime = System.currentTimeMillis();
+                long compositionStart = System.currentTimeMillis();
                 int offsetX = tile_index[0] * patchW; // Offset by output patch width
                 int offsetY = tile_index[1] * patchH; // Offset by output patch height
 
@@ -420,11 +574,10 @@ public class MainActivity extends AppCompatActivity {
                     // 因此，在此处修改它是安全的。
                     bicubicBaseBitmap.setPixels(sr_patch_pixels, 0, patchW, offsetX, offsetY, patchW, patchH);
                 }
-                endTime = System.currentTimeMillis();
-                Log.i(time_tag, "afterProcess - Composite Patch: " + (endTime - startTime) + " ms");
+                long compositionEnd = System.currentTimeMillis();
 
                 // 3. 应用矩阵变换（如果有）并显示
-                startTime = System.currentTimeMillis();
+                long displayStart = System.currentTimeMillis();
                 Bitmap finalBitmapToDisplay = bicubicBaseBitmap; // Default
                 if (!displayMatrix.isIdentity()) { // 仅在需要变换时创建新位图
                     finalBitmapToDisplay = Bitmap.createBitmap(bicubicBaseBitmap, 0, 0,
@@ -433,14 +586,17 @@ public class MainActivity extends AppCompatActivity {
 
                 final Bitmap displayBitmap = finalBitmapToDisplay; // 对 lambda 来说是有效的 final
                 handler.post(() -> imageView.setImageBitmap(displayBitmap));
-                endTime = System.currentTimeMillis();
-                long displayCost = endTime - startTime;
-                Log.i(time_tag, "afterProcess - Display: " + displayCost + " ms");
+                long displayEnd = System.currentTimeMillis();
 
-                long endTimeFullLoop = System.currentTimeMillis();
-                long totalLoopCost = endTimeFullLoop - startTimeFullLoop;
-                updateTextView(Long.toString(totalLoopCost) + "ms (display: " + displayCost + "ms)");
-                Log.i(time_tag, "afterProcess - Full Loop Time: " + totalLoopCost + " ms. Queue sizes: ModelOut=" + modelOutputQueue.size() + " BiSR=" + biSROutputQueue.size());
+                // 记录详细时间信息
+                long loopEnd = System.currentTimeMillis();
+                long displayCost = displayEnd - displayStart;
+                Log.i(time_tag, "AfterProcess - Total: " + (loopEnd - loopStart) + "ms | Take: " + (takeMiddle - takeStart) + "ms, " + (takeEnd - takeMiddle)  + "ms | Tensor: " + (tensorProcessingEnd - tensorProcessingStart) + "ms | Composite: " + (compositionEnd - compositionStart) + "ms | Display: " + displayCost + "ms");
+
+                updateTextView(Long.toString(loopEnd - loopStart) + "ms (display: " + displayCost + "ms)");
+                Log.i(time_tag, "AfterProcess - Queue sizes: ModelOut=" + modelOutputQueue.size() + " BiSR=" + biSROutputQueue.size() +
+                        " YUV=" + yuvBytesQueue.size() + " RGBForTfInput=" + rgbFrameQueueForTfInput.size() +
+                        " RGBForUpsample=" + rgbFrameQueueForUpsample.size());
 
 
             } catch (InterruptedException e) {
@@ -466,10 +622,11 @@ public class MainActivity extends AppCompatActivity {
     // 从 JNI 调用
     public static void putData(byte[] data) {
         try {
-            // Log.i(mytag, "JNI putData: received " + data.length + " bytes. Queue capacity: " + yuvBytesQueue.remainingCapacity());
-            yuvBytesQueue.put(data);
+            long currentFrameNumber = frameCounter.getAndIncrement(); // 获取并递增帧号
+            // Log.i(mytag, "JNI putData: received " + data.length + " bytes for frame " + currentFrameNumber + ". Queue capacity: " + yuvBytesQueue.remainingCapacity());
+            yuvBytesQueue.put(new TaggedData<>(data, currentFrameNumber));
         } catch (InterruptedException e) {
-            Log.e(mytag, "JNI putData: Interrupted while putting data into yuvBytesQueue.");
+            Log.e(mytag, "JNI putData: Interrupted while putting data into yuvBytesQueue for frame.");
             Thread.currentThread().interrupt();
         }
     }
@@ -481,8 +638,14 @@ public class MainActivity extends AppCompatActivity {
         processingRunning = false; // Signal loops to stop
 
         // 中断线程以使其脱离阻塞队列操作
-        if (preProcessThread != null) {
-            preProcessThread.interrupt();
+        if (yuvToRgbThread != null) {
+            yuvToRgbThread.interrupt();
+        }
+        if (prepareTfInputThread != null) {
+            prepareTfInputThread.interrupt();
+        }
+        if (upsampleThread != null) {
+            upsampleThread.interrupt();
         }
         if (inferenceThread != null) {
             inferenceThread.interrupt();
@@ -493,7 +656,9 @@ public class MainActivity extends AppCompatActivity {
 
         // 等待线程完成（可选，带超时）
         try {
-            if (preProcessThread != null) preProcessThread.join(1000);
+            if (yuvToRgbThread != null) yuvToRgbThread.join(1000);
+            if (prepareTfInputThread != null) prepareTfInputThread.join(1000);
+            if (upsampleThread != null) upsampleThread.join(1000);
             if (inferenceThread != null) inferenceThread.join(1000);
             if (afterProcessThread != null) afterProcessThread.join(1000);
         } catch (InterruptedException e) {
@@ -503,21 +668,12 @@ public class MainActivity extends AppCompatActivity {
 
         // 清空队列（可选，如果线程未完全排空，有助于垃圾回收）
         yuvBytesQueue.clear();
+        rgbFrameQueueForTfInput.clear();
+        rgbFrameQueueForUpsample.clear();
         modelInputQueue.clear();
         modelOutputQueue.clear();
         biSROutputQueue.clear();
-
-
-        // 释放 RenderScript 资源
-        if (inAllocYuvToRgb != null) inAllocYuvToRgb.destroy();
-        if (outAllocYuvToRgb != null) outAllocYuvToRgb.destroy();
-        if (scriptYuvToRgb != null) scriptYuvToRgb.destroy();
-        if (mRsYuvToRgb != null) mRsYuvToRgb.destroy();
-
-        if (inAllocResize != null) inAllocResize.destroy();
-        if (outAllocResize != null) outAllocResize.destroy();
-        if (scriptResize != null) scriptResize.destroy();
-        if (mRsResize != null) mRsResize.destroy();
+        frameCounter.set(0); // 重置帧号计数器
 
         // 释放 TFLite 模型
         if (srTFLite != null) {
@@ -526,13 +682,6 @@ public class MainActivity extends AppCompatActivity {
         if (biTFLite != null) {
             // biTFLite.close(); // 假设 BiTFLite 也有一个 close() 方法
         }
-
-        // 回收可重用位图，如果它们不受已销毁的 Allocations 管理
-        // 与 Allocations 链接的位图（例如通过 createFromBitmap）可能由 RS 管理。
-        // 独立位图应回收。
-        if (inputBitmap != null && !inputBitmap.isRecycled()) inputBitmap.recycle();
-        if (model_input_bitmap != null && !model_input_bitmap.isRecycled()) model_input_bitmap.recycle();
-        if (bicubic_output_bitmap != null && !bicubic_output_bitmap.isRecycled()) bicubic_output_bitmap.recycle();
 
 
         Log.i(mytag, "onDestroy finished.");

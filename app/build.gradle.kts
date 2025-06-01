@@ -66,6 +66,9 @@ android {
 
 dependencies {
 
+    implementation ("androidx.core:core-ktx:1.2.0")
+    implementation(libs.androidx.core.ktx)
+
     implementation(libs.appcompat)
     implementation(libs.material)
     implementation(libs.activity)
@@ -74,11 +77,18 @@ dependencies {
     androidTestImplementation(libs.ext.junit)
     androidTestImplementation(libs.espresso.core)
 
-    implementation("org.tensorflow:tensorflow-lite:2.8.0")
-    implementation("org.tensorflow:tensorflow-lite-gpu:2.8.0")
-    implementation("org.tensorflow:tensorflow-lite-gpu-delegate-plugin:0.4.1")
-    implementation("org.tensorflow:tensorflow-lite-support:0.3.1")
-    implementation("org.tensorflow:tensorflow-lite-metadata:0.3.1")
+//    implementation("org.tensorflow:tensorflow-lite:2.8.0")
+//    implementation("org.tensorflow:tensorflow-lite-gpu:2.8.0")
+//    implementation("org.tensorflow:tensorflow-lite-gpu-delegate-plugin:0.4.1")
+//    implementation("org.tensorflow:tensorflow-lite-support:0.3.1")
+//    implementation("org.tensorflow:tensorflow-lite-metadata:0.3.1")
+
+    implementation("com.google.ai.edge.litert:litert:1.3.0")
+    implementation("com.google.ai.edge.litert:litert-gpu:1.3.0")
+    implementation("com.google.ai.edge.litert:litert-metadata:1.3.0")
+    implementation("com.google.ai.edge.litert:litert-support:1.3.0")
+
+
     implementation("com.qualcomm.qti:qnn-litert-delegate:2.34.0")
     implementation("com.qualcomm.qti:qnn-runtime:2.34.0")
 }

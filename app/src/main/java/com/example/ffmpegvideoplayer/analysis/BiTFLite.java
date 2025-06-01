@@ -170,10 +170,10 @@ public class BiTFLite {
     public void addQNNDelegate(Activity activity) {
         try {
             QnnDelegate.Options qnnOptions = new QnnDelegate.Options();
-            qnnOptions.setBackendType(QnnDelegate.Options.BackendType.GPU_BACKEND);
-            qnnOptions.setGpuPerformanceMode(QnnDelegate.Options.GpuPerformanceMode.GPU_PERFORMANCE_HIGH);
-            qnnOptions.setGpuPrecision(QnnDelegate.Options.GpuPrecision.GPU_PRECISION_FP16);
-//            qnnOptions.setBackendType(QnnDelegate.Options.BackendType.DSP_BACKEND);
+//            qnnOptions.setBackendType(QnnDelegate.Options.BackendType.GPU_BACKEND);
+//            qnnOptions.setGpuPerformanceMode(QnnDelegate.Options.GpuPerformanceMode.GPU_PERFORMANCE_HIGH);
+//            qnnOptions.setGpuPrecision(QnnDelegate.Options.GpuPrecision.GPU_PRECISION_FP16);
+            qnnOptions.setBackendType(QnnDelegate.Options.BackendType.DSP_BACKEND);
             if (activity != null && activity.getApplicationInfo() != null) {
                 qnnOptions.setSkelLibraryDir(activity.getApplicationInfo().nativeLibraryDir);
             } else {

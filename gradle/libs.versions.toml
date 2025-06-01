@@ -16,6 +16,9 @@ appcompat = "1.1.0"
 material = "1.4.0"
 activity = "1.0.0"
 constraintlayout = "2.0.1"
+androidxCore = "1.2.0"
+
+
 
 [libraries]
 junit = { group = "junit", name = "junit", version.ref = "junit" }
@@ -25,6 +28,7 @@ appcompat = { group = "androidx.appcompat", name = "appcompat", version.ref = "a
 material = { group = "com.google.android.material", name = "material", version.ref = "material" }
 activity = { group = "androidx.activity", name = "activity", version.ref = "activity" }
 constraintlayout = { group = "androidx.constraintlayout", name = "constraintlayout", version.ref = "constraintlayout" }
+androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "androidxCore" }
 
 [plugins]
 androidApplication = { id = "com.android.application", version.ref = "agp" }

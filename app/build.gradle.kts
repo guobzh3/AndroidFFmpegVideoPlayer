@@ -58,6 +58,10 @@ android {
             }
         }
     }
+    packagingOptions {
+        // ... 可能有上面的 exclude 配置 ...
+        jniLibs.useLegacyPackaging = true // 注意 Kotlin DSL 的写法
+    }
 }
 
 dependencies {
@@ -75,4 +79,6 @@ dependencies {
     implementation("org.tensorflow:tensorflow-lite-gpu-delegate-plugin:0.4.1")
     implementation("org.tensorflow:tensorflow-lite-support:0.3.1")
     implementation("org.tensorflow:tensorflow-lite-metadata:0.3.1")
+    implementation("com.qualcomm.qti:qnn-litert-delegate:2.34.0")
+    implementation("com.qualcomm.qti:qnn-runtime:2.34.0")
 }

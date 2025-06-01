@@ -1,11 +1,14 @@
 package com.example.ffmpegvideoplayer.analysis;
 
+import android.app.Activity;
 import android.content.Context;
 import android.graphics.Bitmap;
 import android.os.Build;
 import android.util.Log;
 import android.util.Size;
 import android.widget.Toast;
+
+import com.qualcomm.qti.QnnDelegate;
 
 import org.tensorflow.lite.DataType;
 import org.tensorflow.lite.Interpreter;
@@ -36,6 +39,7 @@ public class BiTFLite {
     private final Size INPNUT_SIZE = new Size(960, 540);
     private final int[] OUTPUT_SIZE = new int[] {1, 2160, 3840, 3};
     private Boolean IS_INT8 = false;
+    private static final String TAG = "[Inference TFLite]";
     MetadataExtractor.QuantizationParams input5SINT8QuantParams = new MetadataExtractor.QuantizationParams(0.003921568859368563f, 0);
     MetadataExtractor.QuantizationParams output5SINT8QuantParams = new MetadataExtractor.QuantizationParams(0.003921568859368563f, 0);
     //    private TensorBuffer hwcOutputTensorBuffer;
@@ -163,6 +167,30 @@ public class BiTFLite {
         }
     }
 
+    public void addQNNDelegate(Activity activity) {
+        try {
+            QnnDelegate.Options qnnOptions = new QnnDelegate.Options();
+            qnnOptions.setBackendType(QnnDelegate.Options.BackendType.GPU_BACKEND);
+            qnnOptions.setGpuPerformanceMode(QnnDelegate.Options.GpuPerformanceMode.GPU_PERFORMANCE_HIGH);
+            qnnOptions.setGpuPrecision(QnnDelegate.Options.GpuPrecision.GPU_PRECISION_FP16);
+//            qnnOptions.setBackendType(QnnDelegate.Options.BackendType.DSP_BACKEND);
+            if (activity != null && activity.getApplicationInfo() != null) {
+                qnnOptions.setSkelLibraryDir(activity.getApplicationInfo().nativeLibraryDir);
+            } else {
+                Log.w(TAG, "Activity or ApplicationInfo is null for SkelLibraryDir. HTP/DSP backend might fail.");
+            }
+            // qnnOptions.setLogLevel(QnnDelegate.Options.LogLevel.INFO); // Debugging
+
+            QnnDelegate qnnDelegate = new QnnDelegate(qnnOptions); // 局部变量
+            this.options.addDelegate(qnnDelegate);
+            Log.i(TAG, "BI Qualcomm QNN Delegate added with backend: " + qnnOptions.getBackendType());
+
+        } catch (Exception e) {
+            Log.e(TAG, "Failed to create or add QNN Delegate: " + e.getMessage(), e);
+            Toast.makeText(activity, "QNN Delegate not loaded: " + e.getMessage(), Toast.LENGTH_SHORT).show();
+            // 如果失败，则不添加委托，后续 Interpreter 初始化会使用没有此委托的 options
+        }
+    }
     public void addThread(int thread) {
         options.setNumThreads(thread);
         Log.i("[Inference TFLite]", "using addThread: " + thread);

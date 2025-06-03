@@ -21,8 +21,6 @@ import org.tensorflow.lite.support.metadata.MetadataExtractor; // 为完整性�
 import org.tensorflow.lite.support.tensorbuffer.TensorBuffer;
 import org.tensorflow.lite.gpu.CompatibilityList;
 import org.tensorflow.lite.gpu.GpuDelegate;
-// import org.tensorflow.lite.support.common.ops.DequantizeOp; // 原始代码中未使用，保留供参考
-// import org.tensorflow.lite.support.common.ops.QuantizeOp; // 在 ImageProcessor 中使用
 
 import com.qualcomm.qti.QnnDelegate;
 import android.app.Activity;
@@ -36,26 +34,12 @@ public class InferenceTFLite {
     Interpreter.Options options = new Interpreter.Options();
     private final Size INPNUT_SIZE = new Size(480, 270); // Width, Height
 
-    // Model file names (original selection logic preserved)
-    //    private String MODEL_FILE = "quicsr_270p.tflite";
-    //    private String MODEL_FILE = "quicsr_int32_270pto540p.tflite";
-    //    private String MODEL_FILE = "quicsr_v2_270pto540p.tflite";
-    //    private String MODEL_FILE = "quicsr_ds_270pto540p.tflite";
-    //    private String MODEL_FILE = "quicsr_ds_540pto1080p.tflite";
     private String MODEL_FILE = "quicsr_ds_dStride2_270pto540p_noresnet.tflite";
-    //    private String MODEL_FILE = "quicsr_ds_dStride2_540pto1080p_1.tflite";
-    //    private String MODEL_FILE = "quicsr_v2_270pto540p_matrix.tflite";
-    //    private String MODEL_FILE = "quicsr_v2_270pto540p_matmul.tflite";
 
     // 此常量由 getOUTPUT_SIZE() 返回
     // 原始: {1, 540, 960, 1} (NHWC, 1 通道)
     private final int[] OUTPUT_SIZE = new int[]{1, 540, 960, 1};
 
-    // 适用于 270p -> 1080p 模型 (原始选择逻辑保留)
-    //    private String MODEL_FILE = "quicsr_float32_270pto1080p.tflite";
-    //    private String MODEL_FILE = "quicsr_int32_270pto1080p.tflite";
-    //    private String MODEL_FILE = "quicsr_ds_270pto1080p.tflite";
-    //    private final int[] OUTPUT_SIZE = new int[] {1, 1080, 1920, 3}; // NHWC, 3 channels
 
     private static final String TAG = "[Inference TFLite]";
     private Boolean IS_INT8 = false; // 用于量化路径的用户定义标志
@@ -67,10 +51,6 @@ public class InferenceTFLite {
 
     ImageProcessor imageProcessor;
 
-//    // 用于保存可重用输出 TensorBuffer 的成员变量
-//    private TensorBuffer hwcOutputTensorBuffer;
-//    // 用于跟踪创建 hwcOutputTensorBuffer 的形状，以处理动态 tf_output_shape
-//    private int[] currentTfOutputShapeForBuffer = null;
 
 
     public void initialModel(Context activity) { // 参数名 'activity' 保持不变，尽管它是一个 Context
@@ -185,24 +165,11 @@ public class InferenceTFLite {
 
 
     public void addQNNDelegate(Activity activity) { // 参数是 Activity
-//            try {
-//                System.loadLibrary("cdsprpc");
-//                Log.i(TAG, "Successfully loaded libcdsprpc.so");
-//            } catch (UnsatisfiedLinkError e) {
-//                Log.e(TAG, "Failed to load libcdsprpc.so: " + e.getMessage(), e);
-//            }
-
         try {
             QnnDelegate.Options qnnOptions = new QnnDelegate.Options();
-            // 原始 QNN 选项保留
              qnnOptions.setBackendType(QnnDelegate.Options.BackendType.GPU_BACKEND);
              qnnOptions.setGpuPerformanceMode(QnnDelegate.Options.GpuPerformanceMode.GPU_PERFORMANCE_HIGH);
              qnnOptions.setGpuPrecision(QnnDelegate.Options.GpuPrecision.GPU_PRECISION_FP16);
-//            qnnOptions.setBackendType(QnnDelegate.Options.BackendType.HTP_BACKEND);
-//            qnnOptions.setHtpPerformanceMode(QnnDelegate.Options.HtpPerformanceMode.HTP_PERFORMANCE_HIGH_PERFORMANCE);
-//            qnnOptions.setHtpPrecision(QnnDelegate.Options.HtpPrecision.HTP_PRECISION_FP16);
-//            qnnOptions.setBackendType(QnnDelegate.Options.BackendType.DSP_BACKEND);
-//            qnnOptions.setLogLevel(QnnDelegate.Options.LogLevel.LOG_LEVEL_WARN);
 
             if (activity != null && activity.getApplicationInfo() != null) {
                 qnnOptions.setSkelLibraryDir(activity.getApplicationInfo().nativeLibraryDir);

@@ -2,6 +2,7 @@ package com.example.ffmpegvideoplayer;
 
 import android.content.Context;
 import android.graphics.Bitmap;
+import android.graphics.Canvas; // Added for placeholder drawing
 import android.os.Build;
 import android.opengl.EGL14;
 import android.opengl.EGLConfig;
@@ -20,6 +21,10 @@ import java.io.InputStreamReader;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.FloatBuffer;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.BlockingQueue;
 
 public class OpenGLImageProcessor {
 
@@ -42,12 +47,17 @@ public class OpenGLImageProcessor {
     private ByteBuffer readbackBuffer = null; // For reusable readback buffer (fallback if PBOs not used)
 
     // PBO related fields
-    private static final int PBO_COUNT = 2; // Number of PBOs for pipelining
+    private static final int PBO_COUNT = 3; // Number of PBOs for pipelining
     private int[] pboIds = null;
     private int pboReadIndex = 0;  // Index of PBO for glReadPixels
     private int pboMapIndex = -1;   // Index of PBO to map and read from CPU
     private int pboBufferSize = 0;
     private boolean isGLES3 = false; // Flag to indicate if GLES 3.0 context is available
+
+    // Bitmap pooling related fields
+    private static final int BITMAP_POOL_SIZE = 15; // Example pool size
+    private BlockingQueue<Bitmap> availableBitmaps;
+    private List<Bitmap> allCreatedBitmapsInPool; // To track all bitmaps created for the pool for final release
 
     private FloatBuffer vertexBuffer;
     private FloatBuffer texCoordBuffer;
@@ -157,6 +167,13 @@ public class OpenGLImageProcessor {
             }
         }
 
+        if (!setupBitmapPool()) {
+            Log.e(TAG, "Failed to setup Bitmap pool. Processing might be slow or fail.");
+            // Depending on desired behavior, could return false here or try to continue without pool.
+            // For now, log and continue; process() will try to create Bitmaps if pool is not usable.
+        }
+
+
         Log.i(TAG, "OpenGL setup successful for output size: " + outputWidth + "x" + outputHeight + (isGLES3 ? " (GLES 3 with PBOs)" : " (GLES 2)"));
         return true;
     }
@@ -260,6 +277,29 @@ public class OpenGLImageProcessor {
         GLES30.glBindBuffer(GLES30.GL_PIXEL_PACK_BUFFER, 0);
         pboReadIndex = 0;
         pboMapIndex = -1; // No PBO is ready to be mapped initially
+        return true;
+    }
+
+    private boolean setupBitmapPool() {
+        availableBitmaps = new ArrayBlockingQueue<>(BITMAP_POOL_SIZE);
+        allCreatedBitmapsInPool = new ArrayList<>(BITMAP_POOL_SIZE);
+        Log.i(TAG, "Setting up Bitmap pool with size: " + BITMAP_POOL_SIZE + " for " + outputWidth + "x" + outputHeight);
+        for (int i = 0; i < BITMAP_POOL_SIZE; i++) {
+            try {
+                Bitmap bmp = Bitmap.createBitmap(outputWidth, outputHeight, Bitmap.Config.ARGB_8888);
+                allCreatedBitmapsInPool.add(bmp);
+                availableBitmaps.offer(bmp);
+            } catch (OutOfMemoryError e) {
+                Log.e(TAG, "OutOfMemoryError while pre-allocating bitmap " + (i + 1) + "/" + BITMAP_POOL_SIZE + " for pool", e);
+                // If pre-allocation fails, the pool will be smaller or empty.
+                // process() will try to create bitmaps if pool.take() fails or pool is empty initially.
+                return false; // Indicate pool setup failed partially or completely
+            } catch (Exception e) {
+                Log.e(TAG, "Exception while pre-allocating bitmap " + (i + 1) + "/" + BITMAP_POOL_SIZE + " for pool", e);
+                return false;
+            }
+        }
+        Log.i(TAG, "Bitmap pool pre-allocated with " + availableBitmaps.size() + " bitmaps.");
         return true;
     }
 
@@ -385,9 +425,16 @@ public class OpenGLImageProcessor {
             Log.e(TAG, "Input bitmap is null or recycled.");
             return null;
         }
-        if (eglDisplay == EGL14.EGL_NO_DISPLAY || eglContext == EGL14.EGL_NO_CONTEXT || currentInputTextureId == 0) {
+        if (eglDisplay == EGL14.EGL_NO_DISPLAY || eglContext == EGL14.EGL_NO_CONTEXT || currentInputTextureId == 0 ) {
             Log.e(TAG, "EGL not setup, resources not initialized, or already released.");
             return null;
+        }
+        // Check for bitmap pool readiness, though process() will try to handle null from pool.
+        if (availableBitmaps == null) {
+            Log.e(TAG, "Bitmap pool not initialized!");
+            // Attempt to create a bitmap directly as a last resort, or return null
+            // For now, let process() handle it, it might try to create one if pool.take() fails.
+            // This path should ideally not be hit if setup was successful.
         }
 
         // Fallback readback buffer check if PBOs are not used
@@ -444,29 +491,94 @@ public class OpenGLImageProcessor {
             // 1. Issue read command to the current pboReadIndex
             GLES30.glBindBuffer(GLES30.GL_PIXEL_PACK_BUFFER, pboIds[pboReadIndex]);
             GLES30.glReadPixels(0, 0, outputWidth, outputHeight, GLES30.GL_RGBA, GLES30.GL_UNSIGNED_BYTE, 0); // Offset 0
-            if (checkGlError("glReadPixels to PBO")) {
-                 GLES30.glBindBuffer(GLES30.GL_PIXEL_PACK_BUFFER, 0);
-                 return null; // or handle error
+            boolean glReadError = checkGlError("glReadPixels to PBO");
+
+            if (glReadError) {
+                Log.e(TAG, "glReadPixels to PBO failed. Will use placeholder.");
+                // outputBitmap remains null, placeholder logic will be hit later
             }
+            // Always unbind the PBO targeted by glReadPixels *after* attempting to map the other PBO,
+            // or if an error occurred during read.
+            // This PBO (pboIds[pboReadIndex]) is now done with its GPU-side work.
+             GLES30.glBindBuffer(GLES30.GL_PIXEL_PACK_BUFFER, 0);
 
-            // 2. Try to map and process the pboMapIndex (previous PBO)
-            if (pboMapIndex != -1) {
+
+            // 2. Try to map and process the pboMapIndex (previous PBO an actual PBO was ready for mapping)
+            if (!glReadError && pboMapIndex != -1) {
                 GLES30.glBindBuffer(GLES30.GL_PIXEL_PACK_BUFFER, pboIds[pboMapIndex]);
-                ByteBuffer mappedBuffer = (ByteBuffer) GLES30.glMapBufferRange(
-                        GLES30.GL_PIXEL_PACK_BUFFER, 0, pboBufferSize, GLES30.GL_MAP_READ_BIT);
+                ByteBuffer mappedBuffer = null;
+                try {
+                    mappedBuffer = (ByteBuffer) GLES30.glMapBufferRange(
+                            GLES30.GL_PIXEL_PACK_BUFFER, 0, pboBufferSize, GLES30.GL_MAP_READ_BIT);
 
-                if (mappedBuffer != null) {
-                    outputBitmap = Bitmap.createBitmap(outputWidth, outputHeight, Bitmap.Config.ARGB_8888);
-                    // The buffer obtained from glMapBufferRange is already positioned at 0 and limited to bufferSize.
-                    // No need to rewind if using it directly.
-                    outputBitmap.copyPixelsFromBuffer(mappedBuffer);
-                    GLES30.glUnmapBuffer(GLES30.GL_PIXEL_PACK_BUFFER);
-                } else {
-                    checkGlError("glMapBufferRange failed for PBO " + pboMapIndex);
-                    Log.e(TAG, "Failed to map PBO buffer: " + pboMapIndex + ". This might happen if data is not ready or an error occurred.");
+                    if (mappedBuffer != null) {
+                        Log.i(TAG, "PBO: Attempting to take bitmap from pool. Pool size: " + availableBitmaps.size());
+                        outputBitmap = availableBitmaps.take(); // Blocks if pool is empty
+                        Log.i(TAG, "PBO: Took bitmap (hashCode: " + (outputBitmap != null ? outputBitmap.hashCode() : "null") + ") from pool. Pool size now: " + availableBitmaps.size());
+                        if (outputBitmap.getWidth() != outputWidth || outputBitmap.getHeight() != outputHeight || outputBitmap.isRecycled()) {
+                            Log.e(TAG, "PBO: Bitmap from pool (hashCode: " + outputBitmap.hashCode() +
+                                    ") is not valid. Expected: " + outputWidth + "x" + outputHeight +
+                                    ", Got: " + outputBitmap.getWidth() + "x" + outputBitmap.getHeight() +
+                                    ", isRecycled: " + outputBitmap.isRecycled() + ". Re-creating. THIS IS A GC SOURCE.");
+                            if(!outputBitmap.isRecycled()) outputBitmap.recycle();
+                            outputBitmap = Bitmap.createBitmap(outputWidth, outputHeight, Bitmap.Config.ARGB_8888);
+                        }
+                        outputBitmap.copyPixelsFromBuffer(mappedBuffer);
+                    } else {
+                        checkGlError("glMapBufferRange failed for PBO " + pboMapIndex);
+                        Log.w(TAG, "Failed to map PBO buffer: " + pboMapIndex + ". Will use placeholder.");
+                        // outputBitmap remains null
+                    }
+                } catch (InterruptedException e) {
+                    Log.e(TAG, "Interrupted while waiting for bitmap from pool for mapped PBO.", e);
+                    Thread.currentThread().interrupt();
+                    // outputBitmap might be null. Let placeholder logic handle it.
+                } finally {
+                    if (mappedBuffer != null) {
+                        GLES30.glUnmapBuffer(GLES30.GL_PIXEL_PACK_BUFFER);
+                    }
+                    GLES30.glBindBuffer(GLES30.GL_PIXEL_PACK_BUFFER, 0); // Unbind pboMapIndex PBO
+                }
+            } else if (pboMapIndex == -1 && !glReadError) {
+                Log.w(TAG, "Initial PBO cycle (pboMapIndex is -1), no PBO to map yet. Will use placeholder.");
+                // outputBitmap remains null
+            }
+            // If glReadError was true, outputBitmap is also null here.
+
+            // If outputBitmap is still null at this point, get/create a placeholder
+            if (outputBitmap == null) {
+                Log.w(TAG, "PBO processing yielded null or error, preparing placeholder. pboMapIndex: " + pboMapIndex + ", glReadError: " + glReadError);
+                try {
+                    Log.d(TAG, "PBO Placeholder: Attempting to take bitmap. Pool size: " + availableBitmaps.size());
+                    outputBitmap = availableBitmaps.take();
+                    Log.d(TAG, "PBO Placeholder: Took bitmap (hashCode: " + (outputBitmap != null ? outputBitmap.hashCode() : "null") + "). Pool size now: " + availableBitmaps.size());
+                    if (outputBitmap.getWidth() != outputWidth || outputBitmap.getHeight() != outputHeight || outputBitmap.isRecycled()) {
+                        Log.e(TAG, "PBO Placeholder: Bitmap from pool (hashCode: " + outputBitmap.hashCode() +
+                                ") is not valid. Expected: " + outputWidth + "x" + outputHeight +
+                                ", Got: " + outputBitmap.getWidth() + "x" + outputBitmap.getHeight() +
+                                ", isRecycled: " + outputBitmap.isRecycled() + ". Re-creating. THIS IS A GC SOURCE.");
+                        if(!outputBitmap.isRecycled()) outputBitmap.recycle();
+                        outputBitmap = Bitmap.createBitmap(outputWidth, outputHeight, Bitmap.Config.ARGB_8888);
+                    }
+                    Canvas canvas = new Canvas(outputBitmap);
+                    if (glReadError) {
+                        canvas.drawColor(0xFFFF0000); // Red for glReadPixels error
+                    } else if (pboMapIndex == -1) {
+                        canvas.drawColor(0xFF0000FF); // Blue for initial unready PBO
+                    } else { // Presumed map fail or interrupt during map data copy
+                        canvas.drawColor(0xFFFFA500); // Orange for map fail/other
+                    }
+                } catch (InterruptedException e) {
+                    Log.e(TAG, "Interrupted while getting placeholder bitmap.", e);
+                    Thread.currentThread().interrupt();
+                    GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
+                    return null; // Critical: cannot get even a placeholder.
+                } catch (Exception e) {
+                    Log.e(TAG, "Exception while creating/taking placeholder bitmap.", e);
+                    GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
+                    return null;
                 }
             }
-            GLES30.glBindBuffer(GLES30.GL_PIXEL_PACK_BUFFER, 0); // Important to unbind
 
             // 3. Update PBO indices for next frame
             pboMapIndex = pboReadIndex;
@@ -478,7 +590,23 @@ public class OpenGLImageProcessor {
                 Log.e(TAG, "Fallback Readback buffer is null!");
                 return null;
             }
-            outputBitmap = Bitmap.createBitmap(outputWidth, outputHeight, Bitmap.Config.ARGB_8888);
+            try {
+                Log.d(TAG, "GLES2: Attempting to take bitmap from pool. Pool size: " + availableBitmaps.size());
+                outputBitmap = availableBitmaps.take(); // Blocks if pool is empty
+                Log.d(TAG, "GLES2: Took bitmap (hashCode: " + (outputBitmap != null ? outputBitmap.hashCode() : "null") + ") from pool. Pool size now: " + availableBitmaps.size());
+                 if (outputBitmap.getWidth() != outputWidth || outputBitmap.getHeight() != outputHeight || outputBitmap.isRecycled()) {
+                    Log.e(TAG, "GLES2 Path: Bitmap from pool (hashCode: " + outputBitmap.hashCode() +
+                            ") is not valid. Expected: " + outputWidth + "x" + outputHeight +
+                            ", Got: " + outputBitmap.getWidth() + "x" + outputBitmap.getHeight() +
+                            ", isRecycled: " + outputBitmap.isRecycled() + ". Re-creating. THIS IS A GC SOURCE.");
+                    if(!outputBitmap.isRecycled()) outputBitmap.recycle();
+                    outputBitmap = Bitmap.createBitmap(outputWidth, outputHeight, Bitmap.Config.ARGB_8888);
+                }
+            } catch (InterruptedException e) {
+                Log.e(TAG, "GLES2 Path: Interrupted while waiting for an available bitmap from pool.", e);
+                Thread.currentThread().interrupt();
+                return null;
+            }
             readbackBuffer.clear(); // Ensure buffer is ready for new data
             GLES20.glReadPixels(0, 0, outputWidth, outputHeight, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, readbackBuffer);
             readbackBuffer.rewind();
@@ -491,16 +619,44 @@ public class OpenGLImageProcessor {
 
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0); // Unbind FBO (common for both paths)
 
-        // Note: outputBitmap might be null if PBO data wasn't ready or mapping failed.
-        // The caller (MainActivity's upsampleLoop) should handle null outputBitmap.
-        // For the first PBO_COUNT-1 frames in PBO mode, outputBitmap will be null.
-        if (outputBitmap != null && checkGlError("Process Frame Post Read")) {
-             if (!outputBitmap.isRecycled()) outputBitmap.recycle();
-             return null;
+        // With placeholder logic, outputBitmap should ideally not be null here,
+        // unless a critical error occurred while obtaining the placeholder.
+        if (checkGlError("Process Frame Post Read")) {
+            // If a GL error occurred after all pixel operations, it's uncertain if outputBitmap is valid.
+            // Depending on the error, we might still return outputBitmap or null.
+            // For safety, if a GL error is detected here, and outputBitmap exists, recycle and return null.
+            if (outputBitmap != null && !outputBitmap.isRecycled()) {
+                Log.e(TAG, "GL error after processing. Recycling potentially corrupt outputBitmap.");
+                outputBitmap.recycle();
+            }
+            return null;
         }
-        return outputBitmap;
+        return outputBitmap; // Should be non-null if placeholder logic worked.
     }
 
+    public void releaseBitmapToPool(Bitmap bitmap) {
+        if (bitmap != null && availableBitmaps != null) {
+            // Optionally, verify if this bitmap originated from the pool if strict control is needed,
+            // but for now, assume any bitmap passed here is intended for pooling if it fits.
+            // Check if it's one of the initially created ones or if its config matches.
+            // For simplicity, just try to offer it. If the queue is full, it might be rejected (if offer is used and queue has capacity).
+            // Using offer to avoid blocking if the pool is somehow overfilled or bitmap is not from pool.
+            if (allCreatedBitmapsInPool.contains(bitmap)) { // Only pool bitmaps we know we created
+                if (!availableBitmaps.offer(bitmap)) {
+                    Log.e(TAG, "Failed to offer bitmap (hashCode: " + bitmap.hashCode() + ", recycled: " + bitmap.isRecycled() + ") back to pool. Pool size: " + availableBitmaps.size() + "/" + BITMAP_POOL_SIZE + ". THIS BITMAP WILL BE GC'D IF NOT RECYCLED ELSEWHERE AND NO OTHER STRONG REFS.");
+                    // If offer fails for a bitmap that originated from the pool, it's a problem.
+                    // It might indicate the pool is too small or bitmaps are not being consumed/released quickly enough.
+                    // Recycling it here could be dangerous if it's still in use elsewhere or if the pool logic is flawed.
+                    // However, if it truly cannot be re-pooled, it's better to log it as an error.
+                }
+            } else {
+                 Log.w(TAG, "Attempted to release a bitmap to pool that was not tracked by the pool. Recycling it directly.");
+                 if (!bitmap.isRecycled()) {
+                    bitmap.recycle();
+                 }
+            }
+        }
+    }
 
     public void release() {
         Log.i(TAG, "Releasing OpenGL resources.");
@@ -526,6 +682,21 @@ public class OpenGLImageProcessor {
                 GLES30.glDeleteBuffers(PBO_COUNT, pboIds, 0);
                 pboIds = null;
             }
+            // Recycle all bitmaps created by the pool
+            if (allCreatedBitmapsInPool != null) {
+                for (Bitmap bmp : allCreatedBitmapsInPool) {
+                    if (bmp != null && !bmp.isRecycled()) {
+                        bmp.recycle();
+                    }
+                }
+                allCreatedBitmapsInPool.clear();
+                allCreatedBitmapsInPool = null;
+            }
+            if (availableBitmaps != null) {
+                availableBitmaps.clear();
+                availableBitmaps = null;
+            }
+
             if (eglSurface != EGL14.EGL_NO_SURFACE) {
                 EGL14.eglDestroySurface(eglDisplay, eglSurface);
                 eglSurface = EGL14.EGL_NO_SURFACE;

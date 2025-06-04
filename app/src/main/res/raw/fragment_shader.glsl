@@ -1,4 +1,4 @@
-precision lowp float;
+precision mediump float;
 
 varying vec2 v_coord; // 输入的纹理坐标 (0.0 to 1.0)
 uniform sampler2D u_Texture; // 输入纹理

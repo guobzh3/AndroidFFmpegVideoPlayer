@@ -4,13 +4,13 @@ plugins {
 
 android {
     namespace = "com.example.ffmpegvideoplayer"
-    compileSdk = 29
+    compileSdk = 34
 
     defaultConfig {
         applicationId = "com.example.ffmpegvideoplayer"
         minSdk = 29
         //noinspection ExpiredTargetSdkVersion
-        targetSdk = 29
+        targetSdk = 34
         versionCode = 1
         versionName = "1.0"
 //        加入renderscript 相关的依赖项目
@@ -66,8 +66,9 @@ android {
 
 dependencies {
 
-    implementation ("androidx.core:core-ktx:1.2.0")
+    implementation ("androidx.core:core-ktx:1.12.0")
     implementation(libs.androidx.core.ktx)
+    implementation(libs.kotlin.stdlib) // 添加显式的 kotlin-stdlib 依赖
 
     implementation(libs.appcompat)
     implementation(libs.material)
@@ -91,4 +92,19 @@ dependencies {
 
     implementation("com.qualcomm.qti:qnn-litert-delegate:2.34.0")
     implementation("com.qualcomm.qti:qnn-runtime:2.34.0")
+}
+
+// 添加 resolutionStrategy 来强制 Kotlin 版本
+configurations.all {
+    resolutionStrategy {
+        force(libs.kotlin.stdlib) // 强制 kotlin-stdlib 的版本
+        // 针对 jdk7 和 jdk8 变体，如果它们也被其他依赖引入，也需要强制
+        // 通常情况下，强制主模块 kotlin-stdlib 应该能间接影响其变体
+        // 但为了更明确，可以分别添加
+        eachDependency {
+            if (requested.group == "org.jetbrains.kotlin" && requested.name.startsWith("kotlin-stdlib")) {
+                useVersion(libs.versions.kotlinStdlib.get())
+            }
+        }
+    }
 }

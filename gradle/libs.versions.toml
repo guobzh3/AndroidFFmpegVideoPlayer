@@ -14,10 +14,10 @@ junitVersion = "1.1.5"
 espressoCore = "3.5.1"
 appcompat = "1.1.0"
 material = "1.4.0"
-activity = "1.0.0"
+activity = "1.8.0" # 更新 activity 版本
 constraintlayout = "2.0.1"
-androidxCore = "1.2.0"
-
+androidxCore = "1.12.0"
+kotlinStdlib = "1.8.22" # 添加 kotlin 版本
 
 
 [libraries]
@@ -29,6 +29,7 @@ material = { group = "com.google.android.material", name = "material", version.r
 activity = { group = "androidx.activity", name = "activity", version.ref = "activity" }
 constraintlayout = { group = "androidx.constraintlayout", name = "constraintlayout", version.ref = "constraintlayout" }
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "androidxCore" }
+kotlin-stdlib = { group = "org.jetbrains.kotlin", name = "kotlin-stdlib", version.ref = "kotlinStdlib" } # 添加 kotlin-stdlib 库
 
 [plugins]
 androidApplication = { id = "com.android.application", version.ref = "agp" }

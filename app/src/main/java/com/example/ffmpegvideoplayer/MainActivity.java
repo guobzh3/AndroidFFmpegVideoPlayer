@@ -31,7 +31,8 @@ import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.Deque;
 import java.util.LinkedList;
-import androidx.core.util.Pools;
+import android.util.Pair; // Added for Pair
+// import androidx.core.util.Pools; // TaggedData Pools are removed
 import com.example.ffmpegvideoplayer.analysis.InferenceTFLite;
 import android.util.Size;
 import org.tensorflow.lite.DataType;
@@ -49,21 +50,21 @@ import com.example.ffmpegvideoplayer.OpenGLImageProcessor;
 public class MainActivity extends AppCompatActivity {
 
     private static final int QUEUE_CAPACITY = 16;
-    private static BlockingQueue<TaggedData<byte[]>> yuvBytesQueue = new ArrayBlockingQueue<>(QUEUE_CAPACITY);
-    private static BlockingQueue<TaggedData<Bitmap>> rgbFrameQueueForTfInput = new ArrayBlockingQueue<>(QUEUE_CAPACITY);
-    private static BlockingQueue<TaggedData<Bitmap>> rgbFrameQueueForUpsample = new ArrayBlockingQueue<>(QUEUE_CAPACITY);
-    private static BlockingQueue<TaggedData<TensorImage>> modelInputQueue = new ArrayBlockingQueue<>(QUEUE_CAPACITY);
-    private static BlockingQueue<TaggedData<TensorBuffer>> modelOutputQueue = new ArrayBlockingQueue<>(QUEUE_CAPACITY);
-    private static BlockingQueue<TaggedData<Bitmap>> biSROutputQueue = new ArrayBlockingQueue<>(QUEUE_CAPACITY);
+    private static BlockingQueue<Pair<byte[], Long>> yuvBytesQueue = new ArrayBlockingQueue<>(QUEUE_CAPACITY);
+    private static BlockingQueue<Pair<Bitmap, Long>> rgbFrameQueueForTfInput = new ArrayBlockingQueue<>(QUEUE_CAPACITY);
+    private static BlockingQueue<Pair<Bitmap, Long>> rgbFrameQueueForUpsample = new ArrayBlockingQueue<>(QUEUE_CAPACITY);
+    private static BlockingQueue<Pair<TensorImage, Long>> modelInputQueue = new ArrayBlockingQueue<>(QUEUE_CAPACITY);
+    private static BlockingQueue<Pair<TensorBuffer, Long>> modelOutputQueue = new ArrayBlockingQueue<>(QUEUE_CAPACITY);
+    private static BlockingQueue<Pair<Bitmap, Long>> biSROutputQueue = new ArrayBlockingQueue<>(QUEUE_CAPACITY);
 
     private static final AtomicLong frameCounter = new AtomicLong(0);
 
-    // TaggedData Pools
-    private static final Pools.SimplePool<TaggedData<byte[]>> yuvTaggedDataPool = new Pools.SimplePool<>(QUEUE_CAPACITY + 5);
-    @SuppressWarnings("unchecked") // Suppressing for generic array creation if we were to use array of pools
-    private static final Pools.SimplePool<TaggedData<Bitmap>> bitmapTaggedDataPool = new Pools.SimplePool<>(QUEUE_CAPACITY * 2 + 10); // Bitmap is used in a few queues
-    private static final Pools.SimplePool<TaggedData<TensorImage>> tensorImageTaggedDataPool = new Pools.SimplePool<>(QUEUE_CAPACITY + 5);
-    private static final Pools.SimplePool<TaggedData<TensorBuffer>> tensorBufferTaggedDataPool = new Pools.SimplePool<>(QUEUE_CAPACITY + 5);
+    // TaggedData Pools - REMOVED
+    // private static final Pools.SimplePool<TaggedData<byte[]>> yuvTaggedDataPool = new Pools.SimplePool<>(QUEUE_CAPACITY + 5);
+    // @SuppressWarnings("unchecked") // Suppressing for generic array creation if we were to use array of pools
+    // private static final Pools.SimplePool<TaggedData<Bitmap>> bitmapTaggedDataPool = new Pools.SimplePool<>(QUEUE_CAPACITY * 2 + 10); // Bitmap is used in a few queues
+    // private static final Pools.SimplePool<TaggedData<TensorImage>> tensorImageTaggedDataPool = new Pools.SimplePool<>(QUEUE_CAPACITY + 5);
+    // private static final Pools.SimplePool<TaggedData<TensorBuffer>> tensorBufferTaggedDataPool = new Pools.SimplePool<>(QUEUE_CAPACITY + 5);
  
     // AtomicLongs for storing processing times of different stages
     private final AtomicLong yuvToRgbTimeMs = new AtomicLong(0);
@@ -113,11 +114,17 @@ public class MainActivity extends AppCompatActivity {
     private SurfaceView surfaceView;
     private ImageView imageView;
     private Handler handler;
+    private Bitmap mDisplayBuffer1;
+    private Bitmap mDisplayBuffer2;
+    private Canvas mDisplayCanvas1; // Canvas for mDisplayBuffer1
+    private Canvas mDisplayCanvas2; // Canvas for mDisplayBuffer2
+    private volatile Bitmap mCurrentDisplayFrontBuffer; // The one ImageView should use
+    private final Object mDisplayBufferLock = new Object();
 
     private TextView fpsTextView;
     private boolean isPICO = false;
 
-    private final static String deligater="gpu";
+    private final static String deligater="qnn";
 
     private InferenceTFLite srTFLite;
 
@@ -173,6 +180,20 @@ public class MainActivity extends AppCompatActivity {
 
         initModel();
 
+        // Initialize display buffers
+        // Ensure video_output_shape is initialized before this point. It is a member variable.
+        // The config ARGB_8888 is common for display.
+        if (video_output_shape.getWidth() > 0 && video_output_shape.getHeight() > 0) {
+            mDisplayBuffer1 = Bitmap.createBitmap(video_output_shape.getWidth(), video_output_shape.getHeight(), Bitmap.Config.ARGB_8888);
+            mDisplayCanvas1 = new Canvas(mDisplayBuffer1);
+            mDisplayBuffer2 = Bitmap.createBitmap(video_output_shape.getWidth(), video_output_shape.getHeight(), Bitmap.Config.ARGB_8888);
+            mDisplayCanvas2 = new Canvas(mDisplayBuffer2);
+            mCurrentDisplayFrontBuffer = mDisplayBuffer1; // Initialize front buffer
+        } else {
+            Log.e(TAG_MAIN, "video_output_shape is not valid for creating display buffers.");
+            // Handle error: perhaps set a flag and don't proceed with display, or use default small buffers
+        }
+
         new Thread(() -> {
             Log.i(TAG_DECODER, "Started.");
             mainDecoder(getString(R.string.video_url));
@@ -221,12 +242,10 @@ public class MainActivity extends AppCompatActivity {
 
         while (processingRunning) {
             try {
-                TaggedData<byte[]> taggedYuvData = yuvBytesQueue.take();
-                byte[] yuvData = taggedYuvData.getData();
-                long frameNum = taggedYuvData.getFrameNumber();
-                // Release TaggedData<byte[]> to pool
-                taggedYuvData.reset();
-                yuvTaggedDataPool.release(taggedYuvData);
+                Pair<byte[], Long> yuvPair = yuvBytesQueue.take();
+                byte[] yuvData = yuvPair.first;
+                long frameNum = yuvPair.second;
+                // No TaggedData to release
                 Log.i(TAG_YUV_RGB, "Proc frame " + frameNum); // Use Log.d for per-frame logs
 
                 long startTime = System.currentTimeMillis();
@@ -247,17 +266,15 @@ public class MainActivity extends AppCompatActivity {
                 // rgbFrameQueueForUpsample gets a reference to the master copy.
                 // Consumers should not recycle this bitmap if it's shared.
                 // The current upsampleLoop passes it to OpenGL or makes a copy if placeholder is needed.
-                TaggedData<Bitmap> tdUpsample = bitmapTaggedDataPool.acquire();
-                if (tdUpsample == null) tdUpsample = new TaggedData<>();
-                tdUpsample.set(rgbFrameMasterCopy, frameNum);
-                rgbFrameQueueForUpsample.put(tdUpsample);
+                Pair<Bitmap, Long> upsamplePair = new Pair<>(rgbFrameMasterCopy, frameNum);
+                rgbFrameQueueForUpsample.put(upsamplePair);
 
                 // rgbFrameQueueForTfInput gets its own distinct copy to ensure isolation,
                 // as TFLite pre-processing might involve transformations or different lifecycles.
-                TaggedData<Bitmap> tdTfInput = bitmapTaggedDataPool.acquire();
-                if (tdTfInput == null) tdTfInput = new TaggedData<>();
-                tdTfInput.set(rgbFrameMasterCopy, frameNum); // Share the same Bitmap instance
-                rgbFrameQueueForTfInput.put(tdTfInput);
+                // Bitmap rgbFrameTfInputCopy = rgbFrameMasterCopy.copy(rgbFrameMasterCopy.getConfig(), false); // If a true copy is needed
+                // For now, we continue to share the same Bitmap instance as per original logic for tdTfInput.set(rgbFrameMasterCopy, frameNum)
+                Pair<Bitmap, Long> tfInputPair = new Pair<>(rgbFrameMasterCopy, frameNum);
+                rgbFrameQueueForTfInput.put(tfInputPair);
 
 
             } catch (InterruptedException e) {
@@ -295,12 +312,10 @@ public class MainActivity extends AppCompatActivity {
                 long loopStart = System.currentTimeMillis();
 
                 long takeStart = System.currentTimeMillis();
-                TaggedData<Bitmap> taggedRgbFrameForTfInput = rgbFrameQueueForTfInput.take();
-                Bitmap rgbFrame = taggedRgbFrameForTfInput.getData();
-                long frameNum = taggedRgbFrameForTfInput.getFrameNumber();
-                // Release TaggedData<Bitmap> to pool
-                taggedRgbFrameForTfInput.reset();
-                bitmapTaggedDataPool.release(taggedRgbFrameForTfInput);
+                Pair<Bitmap, Long> tfInputPair = rgbFrameQueueForTfInput.take();
+                Bitmap rgbFrame = tfInputPair.first;
+                long frameNum = tfInputPair.second;
+                // No TaggedData to release
                 long takeEnd = System.currentTimeMillis();
                 Log.d(TAG_TF_INPUT, "Proc frame " + frameNum); // Use Log.d for per-frame logs
 
@@ -328,10 +343,8 @@ public class MainActivity extends AppCompatActivity {
                 // If it returns a new instance, then modelInputTensor = processedModelInputTensor; is correct.
                 // If it modifies in-place, then just use modelInputTensor.
                 // For safety and clarity, let's assume process returns the instance to use.
-                TaggedData<TensorImage> tdTensorImage = tensorImageTaggedDataPool.acquire();
-                if (tdTensorImage == null) tdTensorImage = new TaggedData<>();
-                tdTensorImage.set(processedModelInputTensor, frameNum);
-                modelInputQueue.put(tdTensorImage); // 放入 TFLite 输入队列
+                Pair<TensorImage, Long> tensorImagePair = new Pair<>(processedModelInputTensor, frameNum);
+                modelInputQueue.put(tensorImagePair); // 放入 TFLite 输入队列
 
                 long processingEnd = System.currentTimeMillis(); // 正确的位置
                 long takeDuration = takeEnd - takeStart;
@@ -343,7 +356,7 @@ public class MainActivity extends AppCompatActivity {
                 Log.i(TAG_TIME, "TFLite Input - F:" + frameNum + " Total: " + (loopEnd - loopStart) + "ms | Take: " + takeDuration + "ms | Proc: " + processingDuration + "ms");
 
             } catch (InterruptedException e) {
-                // The previous line was: modelInputQueue.put(new TaggedData<>(modelInputTensor, frameNum));
+                // The previous line was: modelInputQueue.put(new Pair<>(modelInputTensor, frameNum)); // Adjusted for Pair
                 // This has been replaced by the logic above using processedModelInputTensor.
                 // Ensure the correct TensorImage instance is queued.
                 // The 'modelInputQueue.put' is now part of the 'else' block above.
@@ -366,7 +379,8 @@ public class MainActivity extends AppCompatActivity {
         // Setup is called here on the upsampleThread.
         if (openGLImageProcessor != null && !openGLImageProcessorIsSetup) {
             Log.i(TAG_UPSAMPLE, "Attempting to setup OpenGLImageProcessor.");
-            if (openGLImageProcessor.setup(video_output_shape.getWidth(), video_output_shape.getHeight())) {
+            // Pass input dimensions (VIDEO_INPUT_W, VIDEO_INPUT_H) and output dimensions
+            if (openGLImageProcessor.setup(VIDEO_INPUT_W, VIDEO_INPUT_H, video_output_shape.getWidth(), video_output_shape.getHeight())) {
                 openGLImageProcessorIsSetup = true;
                 Log.i(TAG_UPSAMPLE, "OpenGLImageProcessor setup successful.");
             } else {
@@ -380,12 +394,10 @@ public class MainActivity extends AppCompatActivity {
         while (processingRunning) {
             try {
                 long taketime = System.currentTimeMillis();
-                TaggedData<Bitmap> taggedRgbFrameForUpsample = rgbFrameQueueForUpsample.take();
-                Bitmap rgbFrame = taggedRgbFrameForUpsample.getData();
-                long frameNum = taggedRgbFrameForUpsample.getFrameNumber();
-                // Release TaggedData<Bitmap> from upsample queue
-                taggedRgbFrameForUpsample.reset();
-                bitmapTaggedDataPool.release(taggedRgbFrameForUpsample);
+                Pair<Bitmap, Long> upsamplePair = rgbFrameQueueForUpsample.take();
+                Bitmap rgbFrame = upsamplePair.first;
+                long frameNum = upsamplePair.second;
+                // No TaggedData to release
 
                 if (rgbFrame == null || rgbFrame.isRecycled()) {
                     Log.e(TAG_UPSAMPLE, "Null/recycled frame " + frameNum + ". Skipping.");
@@ -445,10 +457,8 @@ public class MainActivity extends AppCompatActivity {
                     frameToQueue = upscaledBitmap; // This is (almost) always a 4K bitmap (real or placeholder from GL)
                     logSuffix = " (Processed by GL)";
                 }
-                TaggedData<Bitmap> tdBiSR = bitmapTaggedDataPool.acquire();
-                if (tdBiSR == null) tdBiSR = new TaggedData<>();
-                tdBiSR.set(frameToQueue, frameNum);
-                biSROutputQueue.put(tdBiSR);
+                Pair<Bitmap, Long> biSRPair = new Pair<>(frameToQueue, frameNum);
+                biSROutputQueue.put(biSRPair);
                 // Log.d(TAG_UPSAMPLE, "Queued frame " + frameNum + logSuffix); // Optional detailed log
                 // The input rgbFrame is a copy from yuvToRgbLoop.
                 // It's used by openGLImageProcessor.process(). After that, this specific copy
@@ -473,12 +483,10 @@ public class MainActivity extends AppCompatActivity {
                 long loopStart = System.currentTimeMillis();
 
                 long takeStart = System.currentTimeMillis();
-                TaggedData<TensorImage> taggedModelInput = modelInputQueue.take();
-                TensorImage modelInput = taggedModelInput.getData();
-                long frameNum = taggedModelInput.getFrameNumber();
-                // Release TaggedData<TensorImage>
-                taggedModelInput.reset();
-                tensorImageTaggedDataPool.release(taggedModelInput);
+                Pair<TensorImage, Long> modelInputPair = modelInputQueue.take();
+                TensorImage modelInput = modelInputPair.first;
+                long frameNum = modelInputPair.second;
+                // No TaggedData to release
                 long takeEnd = System.currentTimeMillis();
                 Log.d(TAG_INFERENCE, "Proc frame " + frameNum); // Use Log.d
 
@@ -496,10 +504,8 @@ public class MainActivity extends AppCompatActivity {
                 inferenceTimeMs.set(inferenceDuration);
                 Log.i(TAG_TIME, "Inference - F:" + frameNum + " Total: " + (loopEnd - loopStart) + "ms | Take: " + takeDuration + "ms | Infer: " + inferenceDuration + "ms");
 
-                TaggedData<TensorBuffer> tdTensorBuffer = tensorBufferTaggedDataPool.acquire();
-                if (tdTensorBuffer == null) tdTensorBuffer = new TaggedData<>();
-                tdTensorBuffer.set(modelOutput, frameNum);
-                modelOutputQueue.put(tdTensorBuffer); // 如果队列已满则阻塞
+                Pair<TensorBuffer, Long> tensorBufferPair = new Pair<>(modelOutput, frameNum);
+                modelOutputQueue.put(tensorBufferPair); // 如果队列已满则阻塞
 
             } catch (InterruptedException e) {
                 Log.w(TAG_INFERENCE, "Loop interrupted.");
@@ -520,32 +526,32 @@ public class MainActivity extends AppCompatActivity {
             // displayMatrix.postRotate(90);
         }
 
-        Deque<TaggedData<Bitmap>> pendingBiSRFrames = new LinkedList<>();
-        Deque<TaggedData<TensorBuffer>> pendingModelFrames = new LinkedList<>();
+        Deque<Pair<Bitmap, Long>> pendingBiSRFrames = new LinkedList<>();
+        Deque<Pair<TensorBuffer, Long>> pendingModelFrames = new LinkedList<>();
 
         while (processingRunning) {
             try {
-                TaggedData<Bitmap> bicubicFrameToProcess = null;
-                TaggedData<TensorBuffer> modelFrameToProcess = null;
+                Pair<Bitmap, Long> bicubicPairToProcess = null;
+                Pair<TensorBuffer, Long> modelPairToProcess = null;
                 long currentFrameNumForProcessing = -1;
                 long overallLoopStart = System.currentTimeMillis(); // Renamed for clarity
                 long syncStartTime = System.currentTimeMillis();
 
                 // Synchronize frames
-                while (processingRunning && (bicubicFrameToProcess == null || modelFrameToProcess == null)) {
+                while (processingRunning && (bicubicPairToProcess == null || modelPairToProcess == null)) {
                     if (pendingBiSRFrames.isEmpty()) {
                         if (!processingRunning) break;
-                        TaggedData<Bitmap> takenBiSR = biSROutputQueue.take();
+                        Pair<Bitmap, Long> takenBiSR = biSROutputQueue.take();
                         pendingBiSRFrames.addLast(takenBiSR);
                     }
                     if (pendingModelFrames.isEmpty()) {
                         if (!processingRunning) break;
-                        TaggedData<TensorBuffer> takenModel = modelOutputQueue.take();
+                        Pair<TensorBuffer, Long> takenModel = modelOutputQueue.take();
                         pendingModelFrames.addLast(takenModel);
                     }
 
-                    TaggedData<Bitmap> headBiSR = pendingBiSRFrames.peekFirst();
-                    TaggedData<TensorBuffer> headModel = pendingModelFrames.peekFirst();
+                    Pair<Bitmap, Long> headBiSR = pendingBiSRFrames.peekFirst();
+                    Pair<TensorBuffer, Long> headModel = pendingModelFrames.peekFirst();
 
                     if (headBiSR == null || headModel == null) { // Should only happen if interrupted during take
                         if (!processingRunning) break;
@@ -554,53 +560,46 @@ public class MainActivity extends AppCompatActivity {
                         continue;
                     }
 
-                    long frameNumBiSR = headBiSR.getFrameNumber();
-                    long frameNumModel = headModel.getFrameNumber();
+                    long frameNumBiSR = headBiSR.second;
+                    long frameNumModel = headModel.second;
 
                     if (frameNumBiSR == frameNumModel) {
-                        bicubicFrameToProcess = pendingBiSRFrames.removeFirst();
-                        modelFrameToProcess = pendingModelFrames.removeFirst();
+                        bicubicPairToProcess = pendingBiSRFrames.removeFirst();
+                        modelPairToProcess = pendingModelFrames.removeFirst();
                         currentFrameNumForProcessing = frameNumModel; // Use matched frame number
                         Log.d(TAG_AFTER_PROC, "Matched frame " + currentFrameNumForProcessing); // Use Log.d
-                        // Note: bicubicFrameToProcess and modelFrameToProcess will be released after use later
+                        // Note: Pair objects themselves don't need explicit release like pooled TaggedData
                     } else if (frameNumBiSR < frameNumModel) {
                         Log.w(TAG_AFTER_PROC, "Discarding stale BiSR frame " + frameNumBiSR + " (Model at " + frameNumModel + ")");
-                        TaggedData<Bitmap> staleBiSR = pendingBiSRFrames.removeFirst();
+                        Pair<Bitmap, Long> staleBiSRPair = pendingBiSRFrames.removeFirst();
                         // Recycle Bitmap data if necessary and safe
-                        if (staleBiSR.getData() != null && !staleBiSR.getData().isRecycled()) {
+                        if (staleBiSRPair.first != null && !staleBiSRPair.first.isRecycled()) {
                            // It's from the OpenGL pool or a placeholder copy, manage its lifecycle there/or let GC handle if it's a copy
-                           // For now, just release the TaggedData wrapper
                         }
-                        staleBiSR.reset();
-                        bitmapTaggedDataPool.release(staleBiSR);
+                        // No TaggedData wrapper to release/reset
                     } else { // frameNumBiSR > frameNumModel
                         Log.w(TAG_AFTER_PROC, "Discarding stale Model frame " + frameNumModel + " (BiSR at " + frameNumBiSR + ")");
-                        TaggedData<TensorBuffer> staleModel = pendingModelFrames.removeFirst();
+                        Pair<TensorBuffer, Long> staleModelPair = pendingModelFrames.removeFirst();
                         // TensorBuffer data typically doesn't need explicit recycling like Bitmaps
-                        staleModel.reset();
-                        tensorBufferTaggedDataPool.release(staleModel);
+                        // No TaggedData wrapper to release/reset
                     }
                 } // End of synchronization loop
                 long syncEndTime = System.currentTimeMillis();
                 afterProcessSyncTimeMs.set(syncEndTime - syncStartTime);
 
-                if (!processingRunning || bicubicFrameToProcess == null || modelFrameToProcess == null) {
+                if (!processingRunning || bicubicPairToProcess == null || modelPairToProcess == null) {
                     if (processingRunning) { // If not shutting down but still no match, log error
                         Log.e(TAG_AFTER_PROC, "Failed to get matched frame pair. Skipping.");
                     }
                     continue; // Skip this processing cycle
                 }
 
-                // Now we have matched frames: bicubicFrameToProcess and modelFrameToProcess
+                // Now we have matched frames: bicubicPairToProcess and modelPairToProcess
                 // Their frame numbers are currentFrameNumForProcessing.
-                Bitmap pooledBitmap = bicubicFrameToProcess.getData();
-                TensorBuffer hwcOutputTensorBuffer = modelFrameToProcess.getData();
+                Bitmap pooledBitmap = bicubicPairToProcess.first;
+                TensorBuffer hwcOutputTensorBuffer = modelPairToProcess.first;
 
-                // Release the TaggedData wrappers now that we have the data
-                bicubicFrameToProcess.reset();
-                bitmapTaggedDataPool.release(bicubicFrameToProcess);
-                modelFrameToProcess.reset();
-                tensorBufferTaggedDataPool.release(modelFrameToProcess);
+                // No TaggedData wrappers to release
 
                 // Check if the pooledBitmap is a placeholder (original size) or truly upscaled
                 boolean isPlaceholder = pooledBitmap.getWidth() == VIDEO_INPUT_W && pooledBitmap.getHeight() == VIDEO_INPUT_H;
@@ -658,47 +657,67 @@ public class MainActivity extends AppCompatActivity {
 
                 // 3. Handle display matrix transformation and prepare final bitmap for UI
                 long displayStart = System.currentTimeMillis();
-                Bitmap bitmapForUI;
-                Bitmap tempBitmapAfterMatrix = pooledBitmap; // Start with the (now patched) pooled bitmap
+                Bitmap targetDisplayBuffer;
+                Canvas targetDisplayCanvas;
+
+                // tempBitmapAfterMatrix will hold the bitmap to be drawn onto our display buffer.
+                // Initially, it's the pooledBitmap. If a matrix transform is needed, it will be a new bitmap.
+                Bitmap sourceBitmapForDisplay = pooledBitmap;
 
                 if (!displayMatrix.isIdentity()) {
                     // Matrix transformation is needed. Create a new bitmap for this.
-                    tempBitmapAfterMatrix = Bitmap.createBitmap(pooledBitmap, 0, 0, pooledBitmap.getWidth(), pooledBitmap.getHeight(), displayMatrix, true);
-                    // The original pooledBitmap is no longer directly needed for the display path, release it.
+                    // This new bitmap will become the sourceBitmapForDisplay.
+                    sourceBitmapForDisplay = Bitmap.createBitmap(pooledBitmap, 0, 0, pooledBitmap.getWidth(), pooledBitmap.getHeight(), displayMatrix, true);
+                    // The original pooledBitmap is no longer directly needed, release it.
                     if (openGLImageProcessor != null) {
                         openGLImageProcessor.releaseBitmapToPool(pooledBitmap);
                     }
                 }
 
-                // Create a final copy for the ImageView.
-                // tempBitmapAfterMatrix holds the image data (either original pooled & patched, or transformed & patched).
-                bitmapForUI = tempBitmapAfterMatrix.copy(tempBitmapAfterMatrix.getConfig(), false);
+                // Now, draw sourceBitmapForDisplay onto one of our display buffers
+                synchronized (mDisplayBufferLock) {
+                    if (mCurrentDisplayFrontBuffer == mDisplayBuffer1) {
+                        targetDisplayBuffer = mDisplayBuffer2;
+                        targetDisplayCanvas = mDisplayCanvas2;
+                    } else {
+                        targetDisplayBuffer = mDisplayBuffer1;
+                        targetDisplayCanvas = mDisplayCanvas1;
+                    }
 
-                // If tempBitmapAfterMatrix was the original pooled bitmap (i.e., matrix was identity),
-                // it needs to be released now that UI has its copy.
-                if (tempBitmapAfterMatrix == pooledBitmap) { // True if displayMatrix was identity
+                    if (targetDisplayCanvas != null && sourceBitmapForDisplay != null && !sourceBitmapForDisplay.isRecycled()) {
+                        // Clear the canvas with black or a specific color if needed, or just draw over
+                        // For simplicity, we'll just draw over.
+                        // Ensure sourceBitmapForDisplay dimensions match targetDisplayBuffer or use a Rect for scaling.
+                        // Assuming dimensions match for now as per video_output_shape.
+                        targetDisplayCanvas.drawBitmap(sourceBitmapForDisplay, 0, 0, null);
+                    }
+                    mCurrentDisplayFrontBuffer = targetDisplayBuffer; // Swap buffers
+                }
+
+                // If sourceBitmapForDisplay was the original pooledBitmap (i.e., matrix was identity),
+                // it needs to be released now that it has been drawn onto our display buffer.
+                if (sourceBitmapForDisplay == pooledBitmap) {
                     if (openGLImageProcessor != null) {
                         openGLImageProcessor.releaseBitmapToPool(pooledBitmap);
                     }
                 } else {
-                    // If tempBitmapAfterMatrix was the result of createBitmap (matrix transform),
-                    // it's an intermediate temporary bitmap that can be recycled since bitmapForUI is its copy.
-                    if (tempBitmapAfterMatrix != null && !tempBitmapAfterMatrix.isRecycled()) {
-                        tempBitmapAfterMatrix.recycle();
+                    // If sourceBitmapForDisplay was the result of createBitmap (matrix transform),
+                    // it's an intermediate temporary bitmap that can be recycled.
+                    if (sourceBitmapForDisplay != null && !sourceBitmapForDisplay.isRecycled()) {
+                        sourceBitmapForDisplay.recycle();
                     }
                 }
 
-                final Bitmap finalBitmapForImageView = bitmapForUI;
-                handler.post(() -> {
-                    if (imageView != null) { // Check if imageView is still valid
-                        imageView.setImageBitmap(finalBitmapForImageView);
-                    } else {
-                        // If imageView is null (e.g. activity destroying), recycle the bitmap meant for UI
-                        if (finalBitmapForImageView != null && !finalBitmapForImageView.isRecycled()){
-                            finalBitmapForImageView.recycle();
+                // Post the (now front) buffer to UI. mCurrentDisplayFrontBuffer is volatile.
+                final Bitmap finalBitmapForImageView = mCurrentDisplayFrontBuffer;
+                if (finalBitmapForImageView != null) { // Check if buffer is initialized
+                    handler.post(() -> {
+                        if (imageView != null && finalBitmapForImageView != null && !finalBitmapForImageView.isRecycled()) {
+                            imageView.setImageBitmap(finalBitmapForImageView);
                         }
-                    }
-                });
+                        // Do NOT recycle finalBitmapForImageView here, it's one of our persistent buffers.
+                    });
+                }
                 long displayEnd = System.currentTimeMillis();
                 afterProcessDisplayPrepTimeMs.set(displayEnd - displayStart);
 
@@ -738,12 +757,12 @@ public class MainActivity extends AppCompatActivity {
         runOnUiThread(() -> {
             if (fpsTextView != null) {
                 String displayText = String.format(java.util.Locale.US,
-                        "YUV->RGB: % 3d ms\n" +
-                        "TFInput Take: % 3d ms,   Proc: % 3d ms\n" +
-                        "Upsample Take: % 3d ms,  Proc: % 3d ms\n" +
-                        "Inference Take: % 3d ms, Infer: % 3d ms\n" +
-                        "AfterProc Sync: % 3d ms, Tensor: % 3d ms\n" +
-                        "Composite: % 3d ms,      DispPrep: % 3d ms\n" +
+                        "yuv2rgb % 3d; " +
+                        "TFInput: % 3d | % 3d ; " +
+                        "Upsample: % 3d | % 3d ; " +
+                        "Inference: % 3d | % 3d ms; " +
+                        "AfterProc: % 3d | % 3d ms | " +
+                        "% 3d | % 3d ms; " +
                         "AfterProc Total: % 3d ms",
                         yuvToRgbTimeMs.get(),
                         prepareTfInputTakeTimeMs.get(), prepareTfInputProcessingTimeMs.get(),
@@ -761,14 +780,10 @@ public class MainActivity extends AppCompatActivity {
     public static void putData(byte[] data) {
         try {
             long currentFrameNumber = frameCounter.getAndIncrement();
-            TaggedData<byte[]> td = yuvTaggedDataPool.acquire();
-            if (td == null) {
-                td = new TaggedData<>();
-            }
-            td.set(data, currentFrameNumber);
-            yuvBytesQueue.put(td);
+            Pair<byte[], Long> yuvPair = new Pair<>(data, currentFrameNumber);
+            yuvBytesQueue.put(yuvPair);
         } catch (InterruptedException e) {
-            Log.e(TAG_JNI, "putData interrupted for frame ");
+            Log.e(TAG_JNI, "putData interrupted for frame " + frameCounter.get()); // Added frame number to log
             Thread.currentThread().interrupt();
         }
     }
@@ -825,6 +840,21 @@ public class MainActivity extends AppCompatActivity {
         if (openGLImageProcessor != null) {
             openGLImageProcessor.release();
             openGLImageProcessor = null;
+        }
+
+        // Recycle display buffers
+        synchronized (mDisplayBufferLock) {
+            if (mDisplayBuffer1 != null && !mDisplayBuffer1.isRecycled()) {
+                mDisplayBuffer1.recycle();
+                mDisplayBuffer1 = null;
+            }
+            if (mDisplayBuffer2 != null && !mDisplayBuffer2.isRecycled()) {
+                mDisplayBuffer2.recycle();
+                mDisplayBuffer2 = null;
+            }
+            mDisplayCanvas1 = null;
+            mDisplayCanvas2 = null;
+            mCurrentDisplayFrontBuffer = null;
         }
  
         Log.i(TAG_MAIN, "onDestroy finished.");

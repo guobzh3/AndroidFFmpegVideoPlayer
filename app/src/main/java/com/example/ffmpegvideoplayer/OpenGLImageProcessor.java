@@ -47,7 +47,7 @@ public class OpenGLImageProcessor {
     private ByteBuffer readbackBuffer = null; // For reusable readback buffer (fallback if PBOs not used)
 
     // PBO related fields
-    private static final int PBO_COUNT = 3; // Number of PBOs for pipelining
+    private static final int PBO_COUNT = 7; // Number of PBOs for pipelining
     private int[] pboIds = null;
     private int pboReadIndex = 0;  // Index of PBO for glReadPixels
     private int pboMapIndex = -1;   // Index of PBO to map and read from CPU
@@ -94,7 +94,7 @@ public class OpenGLImageProcessor {
         texCoordBuffer.put(TEX_COORDS).position(0);
     }
 
-    public boolean setup(int outputWidth, int outputHeight) {
+    public boolean setup(int inputWidth, int inputHeight, int outputWidth, int outputHeight) { // Added inputWidth, inputHeight
         this.outputWidth = outputWidth;
         this.outputHeight = outputHeight;
 
@@ -148,12 +148,18 @@ public class OpenGLImageProcessor {
             return false;
         }
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, currentInputTextureId);
+        // Pre-allocate texture storage for input texture
+        GLES20.glTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA, inputWidth, inputHeight, 0, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, null);
+        if (checkGlError("Setup Input Texture - glTexImage2D pre-allocation")) {
+            release();
+            return false;
+        }
         GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR);
         GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR);
         GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE);
         GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE);
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0); // Unbind
-        if (checkGlError("Setup Input Texture")) {
+        if (checkGlError("Setup Input Texture - parameters")) {
             release();
             return false;
         }
@@ -414,10 +420,11 @@ public class OpenGLImageProcessor {
         }
 
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, currentInputTextureId);
-        GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, bitmap, 0); // This will reallocate if size changes, or just upload
+        // Use texSubImage2D since texture storage is pre-allocated and size is fixed
+        GLUtils.texSubImage2D(GLES20.GL_TEXTURE_2D, 0, 0, 0, bitmap);
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0); // Unbind
 
-        return !checkGlError("Update Input Texture");
+        return !checkGlError("Update Input Texture with texSubImage2D");
     }
 
     public Bitmap process(Bitmap inputBitmap) {

@@ -116,9 +116,9 @@ Java_com_example_ffmpegvideoplayer_MainActivity_convertFloatToArgbPixels(
         int b = static_cast<int>(inputFloats[i * channels + 2] * 255.0f);
 
         // Clamp values to [0, 255]
-        r = (r < 0) ? 0 : ((r > 255) ? 255 : r);
-        g = (g < 0) ? 0 : ((g > 255) ? 255 : g);
-        b = (b < 0) ? 0 : ((b > 255) ? 255 : b);
+//        r = (r < 0) ? 0 : ((r > 255) ? 255 : r);
+//        g = (g < 0) ? 0 : ((g > 255) ? 255 : g);
+//        b = (b < 0) ? 0 : ((b > 255) ? 255 : b);
 
         outputInts[i] = (0xFF << 24) | (r << 16) | (g << 8) | b; // ARGB
     }

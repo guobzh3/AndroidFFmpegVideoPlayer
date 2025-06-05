@@ -67,7 +67,11 @@ android {
 dependencies {
 
     implementation ("androidx.core:core-ktx:1.12.0")
-    implementation(libs.androidx.core.ktx)
+    implementation("androidx.graphics:graphics-core:1.0.3")
+    implementation("androidx.graphics:graphics-path:1.0.1")
+    implementation("androidx.graphics:graphics-shapes:1.1.0-alpha01")
+
+//    implementation(libs.androidx.core.ktx)
     implementation(libs.kotlin.stdlib) // 添加显式的 kotlin-stdlib 依赖
 
     implementation(libs.appcompat)

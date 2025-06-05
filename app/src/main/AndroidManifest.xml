@@ -16,10 +16,12 @@
 <!--  本来是在application中的：  android:dataExtractionRules="@xml/data_extraction_rules"-->
 
 
-    <uses-feature android:glEsVersion="0x00020000" android:required="true" />
+    <uses-feature android:glEsVersion="0x00030000" android:required="true" />
     <uses-feature
         android:name="android.hardware.camera"
         android:required="false" />
+
+
 
     <application
         android:allowBackup="true"
@@ -35,6 +37,10 @@
         <uses-native-library
             android:name="libcdsprpc.so"
             android:required="true" />
+        <uses-native-library android:name="libOpenCL.so" android:required="false" />
+        <uses-native-library android:name="libOpenCL-car.so" android:required="false"/>
+        <uses-native-library android:name="libOpenCL-pixel.so" android:required="false" />
+
         <activity
             android:name=".MainActivity"
             android:exported="true">

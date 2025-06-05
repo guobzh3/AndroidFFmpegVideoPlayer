@@ -55,7 +55,7 @@ public class OpenGLImageProcessor {
     private boolean isGLES3 = false; // Flag to indicate if GLES 3.0 context is available
 
     // Bitmap pooling related fields
-    private static final int BITMAP_POOL_SIZE = 15; // Example pool size
+    private static final int BITMAP_POOL_SIZE = 7; // Example pool size
     private BlockingQueue<Bitmap> availableBitmaps;
     private List<Bitmap> allCreatedBitmapsInPool; // To track all bitmaps created for the pool for final release
 
@@ -428,6 +428,9 @@ public class OpenGLImageProcessor {
     }
 
     public Bitmap process(Bitmap inputBitmap) {
+        long totalStartTime = System.nanoTime();
+        long dataUploadTimeNs, processTimeNs, dataReadbackTimeNs;
+
         if (inputBitmap == null || inputBitmap.isRecycled()) {
             Log.e(TAG, "Input bitmap is null or recycled.");
             return null;
@@ -457,10 +460,12 @@ public class OpenGLImageProcessor {
             return null;
         }
 
+        long updateTextureStartTime = System.nanoTime();
         if (!updateInputTexture(inputBitmap)) {
             Log.e(TAG, "Failed to update input texture.");
             return null;
         }
+        dataUploadTimeNs = System.nanoTime() - updateTextureStartTime;
 
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fboHandle[0]);
         GLES20.glViewport(0, 0, outputWidth, outputHeight);
@@ -484,7 +489,9 @@ public class OpenGLImageProcessor {
         float texelHeight = 1.0f / inputBitmap.getHeight();
         GLES20.glUniform2f(texelSizeHandle, texelWidth, texelHeight);
 
+        long drawArraysStartTime = System.nanoTime();
         GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4);
+        processTimeNs = System.nanoTime() - drawArraysStartTime;
 
         GLES20.glDisableVertexAttribArray(positionHandle);
         GLES20.glDisableVertexAttribArray(texCoordHandle);
@@ -492,6 +499,7 @@ public class OpenGLImageProcessor {
         // Do not delete currentInputTextureId here, it's reused.
 
         Bitmap outputBitmap = null;
+        long readPixelsStartTime = System.nanoTime();
 
         if (isGLES3 && pboIds != null) {
             // --- PBO Path ---
@@ -590,6 +598,7 @@ public class OpenGLImageProcessor {
             // 3. Update PBO indices for next frame
             pboMapIndex = pboReadIndex;
             pboReadIndex = (pboReadIndex + 1) % PBO_COUNT;
+            dataReadbackTimeNs = System.nanoTime() - readPixelsStartTime;
 
         } else {
             // --- Synchronous GLES20 Path (Fallback) ---
@@ -616,6 +625,7 @@ public class OpenGLImageProcessor {
             }
             readbackBuffer.clear(); // Ensure buffer is ready for new data
             GLES20.glReadPixels(0, 0, outputWidth, outputHeight, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, readbackBuffer);
+            dataReadbackTimeNs = System.nanoTime() - readPixelsStartTime;
             readbackBuffer.rewind();
             outputBitmap.copyPixelsFromBuffer(readbackBuffer);
             if (checkGlError("GLES20 glReadPixels")) {
@@ -638,6 +648,14 @@ public class OpenGLImageProcessor {
             }
             return null;
         }
+
+        long totalEndTime = System.nanoTime();
+        Log.i(TAG, String.format("Process Times: Total: %.2f ms, Upload: %.2f ms, GPU Process: %.2f ms, Readback: %.2f ms",
+                (totalEndTime - totalStartTime) / 1_000_000.0,
+                dataUploadTimeNs / 1_000_000.0,
+                processTimeNs / 1_000_000.0,
+                dataReadbackTimeNs / 1_000_000.0));
+
         return outputBitmap; // Should be non-null if placeholder logic worked.
     }
 

@@ -29,12 +29,14 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.Arrays; // For Arrays.equals
 
+import com.example.ffmpegvideoplayer.MinimalEGLContext;
+
 public class InferenceTFLite {
     private Interpreter tflite;
     Interpreter.Options options = new Interpreter.Options();
     private final Size INPNUT_SIZE = new Size(480, 270); // Width, Height
 
-    private String MODEL_FILE = "quicsr_ds_dStride2_270pto540p_noresnet.tflite";
+    private String MODEL_FILE = "simplesr_tf.tflite";
 
     // 此常量由 getOUTPUT_SIZE() 返回
     // 原始: {1, 540, 960, 1} (NHWC, 1 通道)
@@ -50,6 +52,9 @@ public class InferenceTFLite {
     // MetadataExtractor.QuantizationParams output5SINT8QuantParams = new MetadataExtractor.QuantizationParams(0.003921568859368563f, 0);
 
     ImageProcessor imageProcessor;
+
+    MinimalEGLContext eglCtx = new MinimalEGLContext();
+    boolean x = eglCtx.setup();
 
 
 
@@ -153,7 +158,7 @@ public class InferenceTFLite {
             Log.i(TAG, "GPU delegate added.");
         } else {
             Log.w(TAG, "GPU delegate is not supported on this device. Falling back to CPU threads if configured.");
-            // addThread(4); // Original code had this as an alternative path
+             addThread(4); // Original code had this as an alternative path
         }
     }
 
@@ -170,12 +175,12 @@ public class InferenceTFLite {
             QnnDelegate.Options qnnOptions = new QnnDelegate.Options();
             qnnOptions.setSkelLibraryDir(activity.getApplicationInfo().nativeLibraryDir);
 
-//             qnnOptions.setBackendType(QnnDelegate.Options.BackendType.GPU_BACKEND);
-//             qnnOptions.setGpuPerformanceMode(QnnDelegate.Options.GpuPerformanceMode.GPU_PERFORMANCE_HIGH);
-//             qnnOptions.setGpuPrecision(QnnDelegate.Options.GpuPrecision.GPU_PRECISION_FP16);
-            qnnOptions.setBackendType(QnnDelegate.Options.BackendType.HTP_BACKEND);
-            qnnOptions.setHtpPrecision(QnnDelegate.Options.HtpPrecision.HTP_PRECISION_FP16);
-            qnnOptions.setHtpPerformanceMode(QnnDelegate.Options.HtpPerformanceMode.HTP_PERFORMANCE_SUSTAINED_HIGH_PERFORMANCE);
+             qnnOptions.setBackendType(QnnDelegate.Options.BackendType.GPU_BACKEND);
+             qnnOptions.setGpuPerformanceMode(QnnDelegate.Options.GpuPerformanceMode.GPU_PERFORMANCE_HIGH);
+             qnnOptions.setGpuPrecision(QnnDelegate.Options.GpuPrecision.GPU_PRECISION_FP16);
+//            qnnOptions.setBackendType(QnnDelegate.Options.BackendType.HTP_BACKEND);
+//            qnnOptions.setHtpPrecision(QnnDelegate.Options.HtpPrecision.HTP_PRECISION_FP16);
+//            qnnOptions.setHtpPerformanceMode(QnnDelegate.Options.HtpPerformanceMode.HTP_PERFORMANCE_SUSTAINED_HIGH_PERFORMANCE);
             if (activity != null && activity.getApplicationInfo() != null) {
                 qnnOptions.setSkelLibraryDir(activity.getApplicationInfo().nativeLibraryDir);
             } else {

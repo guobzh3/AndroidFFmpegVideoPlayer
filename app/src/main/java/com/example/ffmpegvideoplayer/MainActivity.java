@@ -121,7 +121,7 @@ public class MainActivity extends AppCompatActivity {
     private TextView fpsTextView;
     private boolean isPICO = false;
 
-    private final static String deligater="gpu";
+    private final static String deligater="qnn";
 
     private InferenceTFLite srTFLite;
 

@@ -35,8 +35,8 @@ android {
         }
     }
     compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_1_8
-        targetCompatibility = JavaVersion.VERSION_1_8
+        sourceCompatibility = JavaVersion.VERSION_20
+        targetCompatibility = JavaVersion.VERSION_20
     }
 //    本地c++链接库
     externalNativeBuild {
@@ -90,6 +90,7 @@ dependencies {
 
     implementation("com.google.ai.edge.litert:litert:1.3.0")
     implementation("com.google.ai.edge.litert:litert-gpu:1.3.0")
+    implementation("com.google.ai.edge.litert:litert-gpu-api:1.3.0")
     implementation("com.google.ai.edge.litert:litert-metadata:1.3.0")
     implementation("com.google.ai.edge.litert:litert-support:1.3.0")
 

@@ -56,13 +56,7 @@ public class MainActivity extends AppCompatActivity {
     private static BlockingQueue<TensorBuffer> modelOutputQueue = new ArrayBlockingQueue<>(QUEUE_CAPACITY);
     private static BlockingQueue<Bitmap> biSROutputQueue = new ArrayBlockingQueue<>(QUEUE_CAPACITY);
 
-    // TaggedData Pools - REMOVED
-    // private static final Pools.SimplePool<TaggedData<byte[]>> yuvTaggedDataPool = new Pools.SimplePool<>(QUEUE_CAPACITY + 5);
-    // @SuppressWarnings("unchecked") // Suppressing for generic array creation if we were to use array of pools
-    // private static final Pools.SimplePool<TaggedData<Bitmap>> bitmapTaggedDataPool = new Pools.SimplePool<>(QUEUE_CAPACITY * 2 + 10); // Bitmap is used in a few queues
-    // private static final Pools.SimplePool<TaggedData<TensorImage>> tensorImageTaggedDataPool = new Pools.SimplePool<>(QUEUE_CAPACITY + 5);
-    // private static final Pools.SimplePool<TaggedData<TensorBuffer>> tensorBufferTaggedDataPool = new Pools.SimplePool<>(QUEUE_CAPACITY + 5);
- 
+
     // AtomicLongs for storing processing times of different stages
     private final AtomicLong yuvToRgbTimeMs = new AtomicLong(0);
     private final AtomicLong prepareTfInputTakeTimeMs = new AtomicLong(0);
@@ -119,9 +113,9 @@ public class MainActivity extends AppCompatActivity {
     private final Object mDisplayBufferLock = new Object();
 
     private TextView fpsTextView;
-    private boolean isPICO = false;
+    private boolean isPICO = true;
 
-    private final static String deligater="qnn";
+    private final static String deligater="gpu";
 
     private InferenceTFLite srTFLite;
 

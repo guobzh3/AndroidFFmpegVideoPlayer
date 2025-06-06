@@ -55,7 +55,7 @@ public class MinimalEGLContext {
                 EGL14.EGL_ALPHA_SIZE, 8,
                 // EGL14.EGL_DEPTH_SIZE, 16, // 如果你需要深度缓冲
                 // EGL14.EGL_STENCIL_SIZE, 8, // 如果你需要模板缓冲
-                EGL14.EGL_RENDERABLE_TYPE, (EGL_CONTEXT_CLIENT_VERSION == 3) ? EGL14.EGL_OPENGL_ES2_BIT : EGL14.EGL_OPENGL_ES2_BIT,
+                EGL14.EGL_RENDERABLE_TYPE, EGL14.EGL_OPENGL_ES2_BIT,
                 EGL14.EGL_SURFACE_TYPE, EGL14.EGL_PBUFFER_BIT, // 我们想要Pbuffer表面
                 EGL14.EGL_NONE // 属性列表结束标记
         };

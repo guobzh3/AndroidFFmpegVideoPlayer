@@ -21,3 +21,5 @@
 #-renamesourcefileattribute SourceFile
 
 -keep class com.qualcomm.qti.** { *; }
+-keep class org.tensorflow.lite.** {*; }
+-dontwarn org.tensorflow.lite.**

@@ -27,6 +27,7 @@ import android.widget.Toast;
 import androidx.appcompat.app.AppCompatActivity;
 
 import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.atomic.AtomicLong;
@@ -36,8 +37,8 @@ import java.util.LinkedList;
 import com.example.ffmpegvideoplayer.analysis.InferenceTFLite;
 import android.util.Size;
 import org.tensorflow.lite.DataType;
-import org.tensorflow.lite.support.common.ops.NormalizeOp;
-import org.tensorflow.lite.support.image.ImageProcessor;
+// import org.tensorflow.lite.support.common.ops.NormalizeOp; // No longer needed
+// import org.tensorflow.lite.support.image.ImageProcessor; // No longer needed
 import org.tensorflow.lite.support.image.TensorImage;
 import org.tensorflow.lite.support.tensorbuffer.TensorBuffer;
 
@@ -49,8 +50,7 @@ import com.example.ffmpegvideoplayer.OpenGLImageProcessor;
 
 public class MainActivity extends AppCompatActivity {
 
-    private static final int QUEUE_CAPACITY = 16;
-    private static BlockingQueue<byte[]> yuvBytesQueue = new ArrayBlockingQueue<>(QUEUE_CAPACITY);
+    private static final int QUEUE_CAPACITY = 64;
     private static BlockingQueue<SharedByteBuffer> rgbFrameQueueForTfInput = new ArrayBlockingQueue<>(QUEUE_CAPACITY);
     private static BlockingQueue<SharedByteBuffer> rgbFrameQueueForUpsample = new ArrayBlockingQueue<>(QUEUE_CAPACITY);
     private static BlockingQueue<TensorImage> modelInputQueue = new ArrayBlockingQueue<>(QUEUE_CAPACITY);
@@ -66,17 +66,19 @@ public class MainActivity extends AppCompatActivity {
     private final AtomicLong inferenceTimeMs = new AtomicLong(0);
     private final AtomicLong upsampleTakeTimeMs = new AtomicLong(0);
     private final AtomicLong upsampleProcessingTimeMs = new AtomicLong(0);
+    private final AtomicLong upsampleProcessingLastTimeMs = new AtomicLong(0);
     private final AtomicLong afterProcessSyncTimeMs = new AtomicLong(0);
     private final AtomicLong afterProcessTensorProcessingTimeMs = new AtomicLong(0);
     private final AtomicLong afterProcessCompositionTimeMs = new AtomicLong(0);
     private final AtomicLong afterProcessDisplayPrepTimeMs = new AtomicLong(0);
     private final AtomicLong afterProcessTotalLoopTimeMs = new AtomicLong(0);
+
+
  
     // private final static String mytag = "MyNativeCode"; // Replaced by specific tags
     // private final static String time_tag = "time"; // Replaced by specific tags and integrated messages
     private static final String TAG_MAIN = "PlayerActivity";
     private static final String TAG_DECODER = "DecoderThread";
-    private static final String TAG_YUV_RGB = "YuvToRgb";
     private static final String TAG_TF_INPUT = "TfInputPrep";
     private static final String TAG_UPSAMPLE = "Upsample";
     private static final String TAG_INFERENCE = "Inference";
@@ -106,12 +108,7 @@ public class MainActivity extends AppCompatActivity {
     private SurfaceView surfaceView;
     private ImageView imageView;
     private Handler handler;
-    private Bitmap mDisplayBuffer1;
-    private Bitmap mDisplayBuffer2;
-    private Canvas mDisplayCanvas1; // Canvas for mDisplayBuffer1
-    private Canvas mDisplayCanvas2; // Canvas for mDisplayBuffer2
-    private volatile Bitmap mCurrentDisplayFrontBuffer; // The one ImageView should use
-    private final Object mDisplayBufferLock = new Object();
+    private volatile Bitmap mLastDisplayedBitmap = null;
 
     private TextView fpsTextView;
     private boolean isPICO = true;
@@ -122,10 +119,9 @@ public class MainActivity extends AppCompatActivity {
 
     private int[] sr_patch_pixels;
 
-    private ImageProcessor imageProcessorTFLiteInput;
+    // private ImageProcessor imageProcessorTFLiteInput; // No longer needed
 
     private volatile boolean processingRunning = true;
-    private Thread yuvToRgbThread;
     private Thread prepareTfInputThread;
     private Thread upsampleThread;
     private Thread inferenceThread;
@@ -166,28 +162,14 @@ public class MainActivity extends AppCompatActivity {
 
         sr_patch_pixels = new int[TF_OUTPUT_W * TF_OUTPUT_H];
 
-        imageProcessorTFLiteInput = new ImageProcessor.Builder()
-                .add(new NormalizeOp(0f, 255f))
-                .build();
+        // imageProcessorTFLiteInput is no longer needed as normalization is done manually.
 
         initModel();
 
         // Initialize the shared buffer pool
         SharedByteBuffer.initialize(VIDEO_INPUT_W * VIDEO_INPUT_H * 4);
 
-        // Initialize display buffers
-        // Ensure video_output_shape is initialized before this point. It is a member variable.
-        // The config ARGB_8888 is common for display.
-        if (video_output_shape.getWidth() > 0 && video_output_shape.getHeight() > 0) {
-            mDisplayBuffer1 = Bitmap.createBitmap(video_output_shape.getWidth(), video_output_shape.getHeight(), Bitmap.Config.ARGB_8888);
-            mDisplayCanvas1 = new Canvas(mDisplayBuffer1);
-            mDisplayBuffer2 = Bitmap.createBitmap(video_output_shape.getWidth(), video_output_shape.getHeight(), Bitmap.Config.ARGB_8888);
-            mDisplayCanvas2 = new Canvas(mDisplayBuffer2);
-            mCurrentDisplayFrontBuffer = mDisplayBuffer1; // Initialize front buffer
-        } else {
-            Log.e(TAG_MAIN, "video_output_shape is not valid for creating display buffers.");
-            // Handle error: perhaps set a flag and don't proceed with display, or use default small buffers
-        }
+        // Display buffers are no longer needed; we will display from the bitmap pool directly.
 
         mainProcess();
 
@@ -197,10 +179,7 @@ public class MainActivity extends AppCompatActivity {
         processingRunning = true;
 
         openGLImageProcessor = new OpenGLImageProcessor(getApplicationContext());
-        java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(5);
-
-        yuvToRgbThread = new Thread(() -> yuvToRgbLoop(latch), "YuvToRgbThread");
-        yuvToRgbThread.start();
+        java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(4);
 
         prepareTfInputThread = new Thread(() -> prepareTfInputLoop(latch), "PrepareTfInputThread");
         prepareTfInputThread.start();
@@ -227,89 +206,13 @@ public class MainActivity extends AppCompatActivity {
         }, "DecoderThread").start();
     }
 
-    private void yuvToRgbLoop(java.util.concurrent.CountDownLatch latch) {
-        Log.i(TAG_YUV_RGB, "Loop Started");
-        RenderScript threadRsYuvToRgb = RenderScript.create(getApplicationContext());
-        Type.Builder yuvTypeBuilder = new Type.Builder(threadRsYuvToRgb, Element.U8(threadRsYuvToRgb))
-                .setX(VIDEO_INPUT_W).setY(VIDEO_INPUT_H).setYuvFormat(ImageFormat.YV12);
-        Allocation inAlloc = Allocation.createTyped(threadRsYuvToRgb, yuvTypeBuilder.create(), Allocation.USAGE_SCRIPT);
-        Type.Builder rgbaTypeBuilder = new Type.Builder(threadRsYuvToRgb, Element.RGBA_8888(threadRsYuvToRgb))
-                .setX(VIDEO_INPUT_W).setY(VIDEO_INPUT_H);
-        Allocation outAlloc = Allocation.createTyped(threadRsYuvToRgb, rgbaTypeBuilder.create(), Allocation.USAGE_SCRIPT);
-        ScriptIntrinsicYuvToRGB scriptYuvToRgb = ScriptIntrinsicYuvToRGB.create(threadRsYuvToRgb, Element.RGBA_8888(threadRsYuvToRgb));
-
-        latch.countDown();
-        Log.i(TAG_YUV_RGB, "Initialized and waiting for data.");
-        // This thread no longer needs its own bitmap or buffer. It gets them from the pool.
-        while (processingRunning) {
-            SharedByteBuffer sharedBuffer = null;
-            try {
-                byte[] yuvData = yuvBytesQueue.take();
-                Log.i(TAG_YUV_RGB, "Processing YUV data");
-
-                long startTime = System.currentTimeMillis();
-                inAlloc.copyFrom(yuvData);
-                scriptYuvToRgb.setInput(inAlloc);
-                scriptYuvToRgb.forEach(outAlloc);
-
-                sharedBuffer = SharedByteBuffer.obtain();
-                if (sharedBuffer == null) {
-                    Log.e(TAG_YUV_RGB, "Failed to obtain a shared buffer. Skipping frame.");
-                    continue;
-                }
-
-                Bitmap tempBitmap = Bitmap.createBitmap(VIDEO_INPUT_W, VIDEO_INPUT_H, Bitmap.Config.ARGB_8888);
-                outAlloc.copyTo(tempBitmap);
-                sharedBuffer.buffer.position(0);
-                tempBitmap.copyPixelsToBuffer(sharedBuffer.buffer);
-                tempBitmap.recycle();
-                sharedBuffer.buffer.position(0);
-
-                long endTime = System.currentTimeMillis();
-                long duration = endTime - startTime;
-                yuvToRgbTimeMs.set(duration);
-                Log.i(TAG_TIME, "YUV->RGB to SharedByteBuffer: " + duration + " ms");
-
-                // Add a reference for each queue it's being added to.
-                sharedBuffer.addRef(); // For upsample queue
-                sharedBuffer.addRef(); // For TF input queue
-                rgbFrameQueueForUpsample.put(sharedBuffer);
-                rgbFrameQueueForTfInput.put(sharedBuffer);
-                
-                // The buffer is now owned by the consumers. Do not release here.
-
-            } catch (InterruptedException e) {
-                if (sharedBuffer != null) {
-                    sharedBuffer.release(); // Release if interrupted before putting into queues
-                }
-                Log.w(TAG_YUV_RGB, "Loop interrupted.");
-                Thread.currentThread().interrupt();
-                break;
-            } catch (Exception e) {
-                Log.e(TAG_YUV_RGB, "Error: " + e.getMessage(), e);
-            }
-        }
-        // 释放 RenderScript 资源
-        if (inAlloc != null) inAlloc.destroy();
-        if (outAlloc != null) outAlloc.destroy();
-        if (scriptYuvToRgb != null) scriptYuvToRgb.destroy();
-        if (threadRsYuvToRgb != null) threadRsYuvToRgb.destroy();
-        // No bitmap to recycle here anymore
-        Log.i(TAG_YUV_RGB, "Loop Finished");
-    }
 
     private void prepareTfInputLoop(java.util.concurrent.CountDownLatch latch) {
         Log.i(TAG_TF_INPUT, "Loop Started");
-        Rect srcRect = new Rect();
-        Rect dstRect = new Rect(0, 0, TF_INPUT_W, TF_INPUT_H);
 
-        // 线程局部位图对象
-        Bitmap threadLocalModelInputBitmap = Bitmap.createBitmap(TF_INPUT_W, TF_INPUT_H, Bitmap.Config.ARGB_8888);
-        Canvas threadLocalModelInputCanvas = new Canvas(threadLocalModelInputBitmap);
-        Paint threadLocalModelInputPaint = new Paint(Paint.FILTER_BITMAP_FLAG);
-
-        // Reuse TensorImage object
-        TensorImage modelInputTensor = new TensorImage(DataType.FLOAT32);
+        // Reuse TensorBuffer and its ByteBuffer to avoid allocations in the loop.
+        TensorBuffer inputTensorBuffer = TensorBuffer.createFixedSize(new int[]{TF_INPUT_H, TF_INPUT_W, 3}, DataType.FLOAT32);
+        ByteBuffer modelInputByteBuffer = inputTensorBuffer.getBuffer();
 
         latch.countDown();
         Log.i(TAG_TF_INPUT, "Initialized and waiting for data.");
@@ -332,20 +235,18 @@ public class MainActivity extends AppCompatActivity {
                     Log.e(TAG_TF_INPUT, "Crop dimensions exceed input. Skipping this frame.");
                     continue;
                 }
-                
-                Bitmap fullFrameBitmap = Bitmap.createBitmap(VIDEO_INPUT_W, VIDEO_INPUT_H, Bitmap.Config.ARGB_8888);
+
+                // Reset buffers for the native call
                 rgbBuffer.position(0);
-                fullFrameBitmap.copyPixelsFromBuffer(rgbBuffer);
+                modelInputByteBuffer.rewind();
 
-                srcRect.set(cropX, cropY, cropX + TF_INPUT_W, cropY + TF_INPUT_H);
-                threadLocalModelInputCanvas.drawBitmap(fullFrameBitmap, srcRect, dstRect, threadLocalModelInputPaint);
-                
-                fullFrameBitmap.recycle();
+                // Call the native function for high-performance processing
+                cropAndNormalizeRgbaToRgbFloat(rgbBuffer, modelInputByteBuffer, cropX, cropY, TF_INPUT_W, TF_INPUT_H, VIDEO_INPUT_W);
 
-                modelInputTensor.load(threadLocalModelInputBitmap);
-                TensorImage processedModelInputTensor = imageProcessorTFLiteInput.process(modelInputTensor);
-
-                modelInputQueue.put(processedModelInputTensor);
+                // Create a new TensorImage for each frame to avoid race conditions.
+                TensorImage modelInputTensor = new TensorImage(DataType.FLOAT32);
+                modelInputTensor.load(inputTensorBuffer);
+                modelInputQueue.put(modelInputTensor);
 
                 long processingEnd = System.currentTimeMillis();
                 long takeDuration = takeEnd - takeStart;
@@ -368,94 +269,72 @@ public class MainActivity extends AppCompatActivity {
                 }
             }
         }
-        if (threadLocalModelInputBitmap != null && !threadLocalModelInputBitmap.isRecycled()) threadLocalModelInputBitmap.recycle();
         Log.i(TAG_TF_INPUT, "Loop Finished");
     }
 
     private void upsampleLoop(java.util.concurrent.CountDownLatch latch) {
         Log.i(TAG_UPSAMPLE, "Loop Started (OpenGL ES)");
 
-        // OpenGLImageProcessor instance is created in mainProcess.
-        // Setup is called here on the upsampleThread.
         if (openGLImageProcessor != null && !openGLImageProcessorIsSetup) {
             Log.i(TAG_UPSAMPLE, "Attempting to setup OpenGLImageProcessor.");
-            // Pass input dimensions (VIDEO_INPUT_W, VIDEO_INPUT_H) and output dimensions
             if (openGLImageProcessor.setup(VIDEO_INPUT_W, VIDEO_INPUT_H, video_output_shape.getWidth(), video_output_shape.getHeight())) {
                 openGLImageProcessorIsSetup = true;
                 Log.i(TAG_UPSAMPLE, "OpenGLImageProcessor setup successful.");
             } else {
                 Log.e(TAG_UPSAMPLE, "Failed to setup OpenGLImageProcessor. Upsampling will be skipped.");
-                // openGLImageProcessor = null; // Or handle more gracefully, for now, it will be skipped in the loop.
-                // We can't show a Toast from a background thread directly.
-                // Consider sending a message to handler if UI feedback is needed.
             }
         }
 
         latch.countDown();
         Log.i(TAG_UPSAMPLE, "Initialized and waiting for data.");
         while (processingRunning) {
+
+
+            // Next, try to queue a new frame for processing
             SharedByteBuffer sharedBuffer = null;
             try {
-                long taketime = System.currentTimeMillis();
-                sharedBuffer = rgbFrameQueueForUpsample.take();
-                ByteBuffer rgbBuffer = sharedBuffer.buffer;
-
-
-                if (rgbBuffer == null) {
-                    Log.e(TAG_UPSAMPLE, "Null buffer. Skipping.");
-                    continue;
+                // Poll instead of take, to keep the loop non-blocking.
+                // A small timeout prevents a busy-wait loop while allowing responsiveness.
+                sharedBuffer = rgbFrameQueueForUpsample.poll(5, java.util.concurrent.TimeUnit.MILLISECONDS);
+                if (sharedBuffer != null) {
+                    ByteBuffer rgbBuffer = sharedBuffer.buffer;
+                    if (rgbBuffer != null && openGLImageProcessor != null && openGLImageProcessorIsSetup) {
+                        rgbBuffer.position(0);
+                        openGLImageProcessor.queueFrame(rgbBuffer, VIDEO_INPUT_W, VIDEO_INPUT_H);
+                    }
                 }
-
-                Log.d(TAG_UPSAMPLE, "Processing buffer for upsample (OpenGL ES)");
-
-                long startTime = System.currentTimeMillis();
-                Bitmap upscaledBitmap = null;
-                if (openGLImageProcessor != null && openGLImageProcessorIsSetup) {
-                    rgbBuffer.position(0);
-                    upscaledBitmap = openGLImageProcessor.process(rgbBuffer, VIDEO_INPUT_W, VIDEO_INPUT_H);
-                } else {
-                    Log.e(TAG_UPSAMPLE, "GL processor null/not setup. Skipping frame.");
-                    continue;
+                else{
+                    // Log.i(TAG_UPSAMPLE, "Didn't put a frame. Move on to next loop.");
                 }
-
-                long endTime = System.currentTimeMillis();
-                long takeDuration = startTime - taketime;
-                long processingDuration = endTime - startTime;
-                upsampleTakeTimeMs.set(takeDuration);
-                upsampleProcessingTimeMs.set(processingDuration);
-                Log.i(TAG_TIME, "OpenGL Upscale - Proc: " + processingDuration + " ms | Take: " + takeDuration + " ms");
-
-                Bitmap frameToQueue;
-                String logSuffix;
-
-                if (upscaledBitmap == null) {
-                    Log.e(TAG_UPSAMPLE, "OpenGLImageProcessor.process() returned null! Critical error.");
-                    // Since we no longer have the original Bitmap, we can't do a fallback here.
-                    // We will just skip this frame.
-                    continue;
-                } else {
-                    frameToQueue = upscaledBitmap;
-                    logSuffix = " (Processed by GL)";
-                }
-                biSROutputQueue.put(frameToQueue);
-                // Log.d(TAG_UPSAMPLE, "Queued frame" + logSuffix);
-
-                // ByteBuffer does not need to be recycled here. It will be reused.
-                // The bitmap `upscaledBitmap` is now in the queue and will be handled by the afterProcessLoop.
-
+                // If sharedBuffer is null, it's fine, we just loop again and check for a processed frame.
             } catch (InterruptedException e) {
-                Log.w(TAG_UPSAMPLE, "Loop interrupted.");
+                Log.w(TAG_UPSAMPLE, "Loop interrupted while polling for a new frame.");
                 Thread.currentThread().interrupt();
                 break;
             } catch (Exception e) {
-                Log.e(TAG_UPSAMPLE, "Error: " + e.getMessage(), e);
+                Log.e(TAG_UPSAMPLE, "Error in upsample loop: " + e.getMessage(), e);
             } finally {
                 if (sharedBuffer != null) {
                     sharedBuffer.release();
                 }
             }
+
+            // First, try to get a processed frame without blocking
+            if (openGLImageProcessor != null && openGLImageProcessorIsSetup) {
+                Bitmap processedBitmap = openGLImageProcessor.getProcessedFrame();
+                if (processedBitmap != null) {
+                    try {
+                        biSROutputQueue.put(processedBitmap);
+                    } catch (InterruptedException e) {
+                        Log.w(TAG_UPSAMPLE, "Interrupted while queueing processed bitmap.");
+                        Thread.currentThread().interrupt();
+                        break;
+                    }
+                }
+            }
         }
-        // OpenGLImageProcessor resources are released in MainActivity's onDestroy
+
+
         Log.i(TAG_UPSAMPLE, "Loop Finished (OpenGL ES)");
     }
     private void inferenceLoop(java.util.concurrent.CountDownLatch latch) {
@@ -543,7 +422,6 @@ public class MainActivity extends AppCompatActivity {
                 afterProcessSyncTimeMs.set(syncEndTime - syncStartTime);
                 Log.d(TAG_AFTER_PROC, "Processing a pair of BiSR and Model frames.");
 
-                // Check if frames are valid (take() should block, but good practice)
                 if (pooledBitmap == null || hwcOutputTensorBuffer == null) {
                     Log.e(TAG_AFTER_PROC, "Failed to get a valid frame pair after take(). Skipping.");
                     if (pooledBitmap != null && !pooledBitmap.isRecycled() && openGLImageProcessor != null) {
@@ -552,99 +430,79 @@ public class MainActivity extends AppCompatActivity {
                     continue;
                 }
 
-                // Check if the pooledBitmap is a placeholder (original size) or truly upscaled
-                boolean isPlaceholder = pooledBitmap.getWidth() == VIDEO_INPUT_W && pooledBitmap.getHeight() == VIDEO_INPUT_H;
+                // CRITICAL FIX: The bitmap from the zero-copy GL pipeline (HardwareBuffer) is IMMUTABLE.
+                // We cannot use setPixels() on it. We must create a mutable copy to draw the SR patch on.
+                Bitmap mutableBitmapForDisplay = pooledBitmap.copy(Bitmap.Config.ARGB_8888, true);
+
+                // We are done with the original immutable bitmap from the pool, so we release it immediately.
+                if (openGLImageProcessor != null) {
+                    openGLImageProcessor.releaseBitmapToPool(pooledBitmap);
+                }
+
+                // Check if the base frame is a placeholder (original size) or truly upscaled
+                boolean isPlaceholder = mutableBitmapForDisplay.getWidth() == VIDEO_INPUT_W && mutableBitmapForDisplay.getHeight() == VIDEO_INPUT_H;
                 if (isPlaceholder) {
                     Log.w(TAG_AFTER_PROC, "BiSR frame is placeholder. SR patch may not align.");
                 }
 
                 // 1. 将 TFLite TensorBuffer 转换为 ARGB int[] patch
                 long tensorProcessingStart = System.currentTimeMillis();
-                float[] hwcOutputData = hwcOutputTensorBuffer.getFloatArray();
-
+                ByteBuffer hwcOutputBuffer = hwcOutputTensorBuffer.getBuffer();
                 int patchH = hwcOutputTensorBuffer.getShape()[1]; // Expected: TF_OUTPUT_H
                 int patchW = hwcOutputTensorBuffer.getShape()[2]; // Expected: TF_OUTPUT_W
                 int channels = hwcOutputTensorBuffer.getShape()[3]; // Expected: 3 (RGB)
 
                 if (sr_patch_pixels == null || sr_patch_pixels.length != patchW * patchH) {
-                    if (patchH != TF_OUTPUT_H || patchW != TF_OUTPUT_W) {
-                        Log.w(TAG_AFTER_PROC, "SR patch dims from tensor (" + patchW + "x" + patchH +
-                                ") != configured TF_OUTPUT (" + TF_OUTPUT_W + "x" + TF_OUTPUT_H +
-                                "). Resizing sr_patch_pixels array to tensor dimensions.");
-                    }
-                    sr_patch_pixels = new int[patchW * patchH];
+                     sr_patch_pixels = new int[patchW * patchH];
                 }
 
                 if (channels == 3) {
-                    convertFloatToArgbPixels(hwcOutputData, sr_patch_pixels, patchW, patchH, channels);
+                    convertFloatBufferToArgbPixels(hwcOutputBuffer, sr_patch_pixels, patchW, patchH, channels);
                 } else {
-                    Log.e(TAG_AFTER_PROC, "Unexpected channel count from TFLite output: " + channels +
-                                          ". Expected 3 (RGB). Skipping native pixel conversion.");
-                    // java.util.Arrays.fill(sr_patch_pixels, 0xFFFF00FF); // Magenta for error
+                    Log.e(TAG_AFTER_PROC, "Unexpected channel count from TFLite output: " + channels);
                 }
-
                 long tensorProcessingEnd = System.currentTimeMillis();
                 afterProcessTensorProcessingTimeMs.set(tensorProcessingEnd - tensorProcessingStart);
 
-                // 2. 将 SR patch放置在双三次上采样的基础图像上
+                // 2. 将 SR patch放置在可变的副本图像上
                 long compositionStart = System.currentTimeMillis();
                 int offsetX = tile_index[0] * patchW;
                 int offsetY = tile_index[1] * patchH;
 
-                if (offsetX + patchW > pooledBitmap.getWidth() || offsetY + patchH > pooledBitmap.getHeight()) {
+                if (offsetX + patchW > mutableBitmapForDisplay.getWidth() || offsetY + patchH > mutableBitmapForDisplay.getHeight()) {
                     Log.e(TAG_AFTER_PROC, "SR patch placement exceeds bitmap bounds. Skip setPixels.");
                 } else {
-                    pooledBitmap.setPixels(sr_patch_pixels, 0, patchW, offsetX, offsetY, patchW, patchH);
+                    mutableBitmapForDisplay.setPixels(sr_patch_pixels, 0, patchW, offsetX, offsetY, patchW, patchH);
                 }
                 long compositionEnd = System.currentTimeMillis();
                 afterProcessCompositionTimeMs.set(compositionEnd - compositionStart);
 
-                // 3. Handle display matrix transformation and prepare final bitmap for UI
+                // 3. Post the final composited bitmap to the UI thread for display
                 long displayStart = System.currentTimeMillis();
-                Bitmap targetDisplayBuffer;
-                Canvas targetDisplayCanvas;
-                Bitmap sourceBitmapForDisplay = pooledBitmap;
+                final Bitmap finalBitmapToDisplay = mutableBitmapForDisplay;
 
-                if (!displayMatrix.isIdentity()) {
-                    sourceBitmapForDisplay = Bitmap.createBitmap(pooledBitmap, 0, 0, pooledBitmap.getWidth(), pooledBitmap.getHeight(), displayMatrix, true);
-                    if (openGLImageProcessor != null && pooledBitmap != null && !pooledBitmap.isRecycled()) {
-                        openGLImageProcessor.releaseBitmapToPool(pooledBitmap);
-                    }
-                }
-
-                synchronized (mDisplayBufferLock) {
-                    if (mCurrentDisplayFrontBuffer == mDisplayBuffer1) {
-                        targetDisplayBuffer = mDisplayBuffer2;
-                        targetDisplayCanvas = mDisplayCanvas2;
-                    } else {
-                        targetDisplayBuffer = mDisplayBuffer1;
-                        targetDisplayCanvas = mDisplayCanvas1;
-                    }
-
-                    if (targetDisplayCanvas != null && sourceBitmapForDisplay != null && !sourceBitmapForDisplay.isRecycled()) {
-                        targetDisplayCanvas.drawBitmap(sourceBitmapForDisplay, 0, 0, null);
-                    }
-                    mCurrentDisplayFrontBuffer = targetDisplayBuffer;
-                }
-                
-                if (sourceBitmapForDisplay == pooledBitmap) {
-                    if (openGLImageProcessor != null && sourceBitmapForDisplay != null && !sourceBitmapForDisplay.isRecycled()) {
-                        openGLImageProcessor.releaseBitmapToPool(sourceBitmapForDisplay);
-                    }
-                } else {
-                    if (sourceBitmapForDisplay != null && !sourceBitmapForDisplay.isRecycled()) {
-                        sourceBitmapForDisplay.recycle();
-                    }
-                }
-
-                final Bitmap finalBitmapForImageView = mCurrentDisplayFrontBuffer;
-                if (finalBitmapForImageView != null) {
-                    handler.post(() -> {
-                        if (imageView != null && finalBitmapForImageView != null && !finalBitmapForImageView.isRecycled()) {
-                            imageView.setImageBitmap(finalBitmapForImageView);
+                handler.post(() -> {
+                    if (imageView != null && finalBitmapToDisplay != null && !finalBitmapToDisplay.isRecycled()) {
+                        if (!displayMatrix.isIdentity()) {
+                            imageView.setImageMatrix(displayMatrix);
                         }
-                    });
-                }
+                        imageView.setImageBitmap(finalBitmapToDisplay);
+
+                        // The previous bitmap was also a temporary mutable copy. It's not in the pool, so we must RECYCLE it.
+                        if (mLastDisplayedBitmap != null && !mLastDisplayedBitmap.isRecycled()) {
+                            if (mLastDisplayedBitmap != finalBitmapToDisplay) {
+                                mLastDisplayedBitmap.recycle();
+                            }
+                        }
+                        // Keep track of the new bitmap so it can be recycled on the next frame.
+                        mLastDisplayedBitmap = finalBitmapToDisplay;
+                    } else {
+                        // If we cannot display this bitmap, we must recycle it to avoid a leak.
+                        if (finalBitmapToDisplay != null && !finalBitmapToDisplay.isRecycled()) {
+                           finalBitmapToDisplay.recycle();
+                        }
+                    }
+                });
                 long displayEnd = System.currentTimeMillis();
                 afterProcessDisplayPrepTimeMs.set(displayEnd - displayStart);
 
@@ -660,9 +518,7 @@ public class MainActivity extends AppCompatActivity {
                         " | Total:" + (overallLoopEnd - overallLoopStart) + "ms");
 
                 updateTextView();
-                Log.i(TAG_AFTER_PROC, "Queue sizes: MO=" + modelOutputQueue.size() + " BiSR=" + biSROutputQueue.size() +
-                        " YUV=" + yuvBytesQueue.size() + " RGBIn=" + rgbFrameQueueForTfInput.size() +
-                        " RGBUp=" + rgbFrameQueueForUpsample.size());
+                Log.i(TAG_AFTER_PROC, "Queue sizes: MO=" + modelOutputQueue.size() + " BiSR=" + biSROutputQueue.size() + " RGBIn=" + rgbFrameQueueForTfInput.size() + " RGBUp=" + rgbFrameQueueForUpsample.size());
  
             } catch (InterruptedException e) {
                 Log.w(TAG_AFTER_PROC, "Loop interrupted.");
@@ -704,14 +560,36 @@ public class MainActivity extends AppCompatActivity {
         });
     }
  
-    // 从 JNI 调用
-    public static void putData(byte[] data) {
+    // 从 JNI 调用, now receives RGBA data
+    public static void putData(byte[] rgbaData) {
+        SharedByteBuffer sharedBuffer = null;
         try {
-            // long currentFrameNumber = frameCounter.getAndIncrement(); // Removed
-            yuvBytesQueue.put(data);
+            sharedBuffer = SharedByteBuffer.obtain();
+            if (sharedBuffer == null) {
+                Log.e(TAG_JNI, "Failed to obtain a shared buffer for RGBA data. Skipping frame.");
+                return;
+            }
+
+            sharedBuffer.buffer.position(0);
+            sharedBuffer.buffer.put(rgbaData);
+            sharedBuffer.buffer.position(0);
+
+            // Add a reference for each queue it's being added to.
+            sharedBuffer.addRef(2);
+            rgbFrameQueueForUpsample.put(sharedBuffer);
+            rgbFrameQueueForTfInput.put(sharedBuffer);
+
         } catch (InterruptedException e) {
+            if (sharedBuffer != null) {
+                sharedBuffer.release(); // Release if interrupted before putting into queues
+            }
             Log.e(TAG_JNI, "putData interrupted");
             Thread.currentThread().interrupt();
+        } catch (Exception e) {
+            if (sharedBuffer != null) {
+                sharedBuffer.release();
+            }
+            Log.e(TAG_JNI, "Error in putData: " + e.getMessage(), e);
         }
     }
 
@@ -722,9 +600,6 @@ public class MainActivity extends AppCompatActivity {
         processingRunning = false; // Signal loops to stop
  
         // 中断线程以使其脱离阻塞队列操作
-        if (yuvToRgbThread != null) {
-            yuvToRgbThread.interrupt();
-        }
         if (prepareTfInputThread != null) {
             prepareTfInputThread.interrupt();
         }
@@ -740,7 +615,6 @@ public class MainActivity extends AppCompatActivity {
 
         // 等待线程完成（可选，带超时）
         try {
-            if (yuvToRgbThread != null) yuvToRgbThread.join(1000);
             if (prepareTfInputThread != null) prepareTfInputThread.join(1000);
             if (upsampleThread != null) upsampleThread.join(1000);
             if (inferenceThread != null) inferenceThread.join(1000);
@@ -751,7 +625,9 @@ public class MainActivity extends AppCompatActivity {
         }
  
         // 清空队列（可选，如果线程未完全排空，有助于垃圾回收）
-        yuvBytesQueue.clear();
+        // Recycle our manually created composition buffers
+
+        
         rgbFrameQueueForTfInput.clear();
         rgbFrameQueueForUpsample.clear();
         modelInputQueue.clear();
@@ -763,25 +639,16 @@ public class MainActivity extends AppCompatActivity {
         if (srTFLite != null) {
             srTFLite.close(); // 假设 InferenceTFLite 有一个 close() 方法
         }
+ 
+        // The last displayed bitmap is a temporary mutable copy, so it must be recycled, not released to the pool.
+        if (mLastDisplayedBitmap != null && !mLastDisplayedBitmap.isRecycled()) {
+            mLastDisplayedBitmap.recycle();
+            mLastDisplayedBitmap = null;
+        }
 
         if (openGLImageProcessor != null) {
             openGLImageProcessor.release();
             openGLImageProcessor = null;
-        }
-
-        // Recycle display buffers
-        synchronized (mDisplayBufferLock) {
-            if (mDisplayBuffer1 != null && !mDisplayBuffer1.isRecycled()) {
-                mDisplayBuffer1.recycle();
-                mDisplayBuffer1 = null;
-            }
-            if (mDisplayBuffer2 != null && !mDisplayBuffer2.isRecycled()) {
-                mDisplayBuffer2.recycle();
-                mDisplayBuffer2 = null;
-            }
-            mDisplayCanvas1 = null;
-            mDisplayCanvas2 = null;
-            mCurrentDisplayFrontBuffer = null;
         }
  
         Log.i(TAG_MAIN, "onDestroy finished.");
@@ -789,6 +656,7 @@ public class MainActivity extends AppCompatActivity {
  
     // 本地方法声明
     public native void mainDecoder(String url);
-    private native void convertFloatToArgbPixels(float[] floatArray, int[] intArray, int width, int height, int channels);
+    private native void cropAndNormalizeRgbaToRgbFloat(ByteBuffer input, ByteBuffer output, int cropX, int cropY, int cropW, int cropH, int inputW);
+    private native void convertFloatBufferToArgbPixels(ByteBuffer floatBuffer, int[] intArray, int width, int height, int channels);
 }
 

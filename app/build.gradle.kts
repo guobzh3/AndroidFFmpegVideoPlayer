@@ -8,14 +8,11 @@ android {
 
     defaultConfig {
         applicationId = "com.example.ffmpegvideoplayer"
-        minSdk = 29
+        minSdk = 33
         //noinspection ExpiredTargetSdkVersion
         targetSdk = 34
         versionCode = 1
         versionName = "1.0"
-//        加入renderscript 相关的依赖项目
-//        renderscriptTargetApi = 24
-//        renderscriptSupportModeEnabled = true
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         externalNativeBuild {
             cmake {
@@ -47,16 +44,6 @@ android {
     }
     buildFeatures {
         mlModelBinding = true
-    }
-    sourceSets {
-        getByName("main") {
-            renderscript {
-                srcDirs("src\\main\\rs", "src\\main\\rs", "src\\main\\rs", "src\\main\\rs",
-                    "src\\main\\rs",
-                    "src\\main\\rs"
-                )
-            }
-        }
     }
     packagingOptions {
         // ... 可能有上面的 exclude 配置 ...

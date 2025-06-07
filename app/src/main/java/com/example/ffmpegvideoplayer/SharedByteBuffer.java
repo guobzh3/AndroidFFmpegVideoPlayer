@@ -40,10 +40,15 @@ public class SharedByteBuffer {
         }
         return sbb;
     }
-
     public void addRef() {
-        refCount.incrementAndGet();
+            addRef(1);
+        }
+
+    public void addRef(int val) {
+        refCount.addAndGet(val);
     }
+
+
 
     public void release() {
         if (refCount.decrementAndGet() == 0) {

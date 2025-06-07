@@ -11,6 +11,8 @@ extern  "C" {
 #include <libavformat/avformat.h>
 #include <libavcodec/avcodec.h>
 #include <libavutil/avutil.h>
+#include <libswscale/swscale.h>
+#include <libavutil/imgutils.h>
 }
 #include <jni.h>
 #include <string>
@@ -34,6 +36,7 @@ public:
     AVCodecContext* deCodecc; // 是一个CodecContext
     int video_index;
     int frame_decoded_count;
+    SwsContext* sws_ctx;
 
     // multithread yuv2rgb
     int thread_num;
@@ -66,6 +69,7 @@ public:
         this->funcMethod = env->GetStaticMethodID(cls, "putData", "([B)V");
 
         this->frame_decoded_count = 0;
+        this->sws_ctx = nullptr;
         this->deFormatc = createFormatc(url); // 用于读取packet av_read_frame(this->deFormatc, input_packet);
         this->deCodecc = createCodecc(this->deFormatc); // 用于对packet进行解码，avcodec_send_packet(this->deCodecc, received_packet); avcodec_receive_frame(this->deCodecc, input_frame);
 
@@ -242,110 +246,47 @@ public:
     int avFrameYUV420ToARGB8888(AVFrame* frame) {
         int width = frame->width;
         int height = frame->height;
-//      创建一个新的jintArray
-        jbyteArray outFrame = env->NewByteArray(width * height * 3 / 2);
+
+        if (this->sws_ctx == nullptr) {
+            this->sws_ctx = sws_getContext(width, height, (AVPixelFormat)frame->format,
+                                     width, height, AV_PIX_FMT_RGBA,
+                                     SWS_BILINEAR, nullptr, nullptr, nullptr);
+            if (!this->sws_ctx) {
+                LOGI("Failed to create sws context");
+                return -1;
+            }
+        }
+
+        // 4 bytes per pixel for RGBA
+        jbyteArray outFrame = env->NewByteArray(width * height * 4);
         if (outFrame == nullptr) {
-            LOGI("Failed to allocate memory");
+            LOGI("Failed to allocate memory for outFrame jbyteArray");
             return -1;
         }
-        // 获取新建的jintArray的指针，后续可以将数据存放在该array中
-        jbyte* outData = env->GetByteArrayElements(outFrame, nullptr); // 返回具体元素的指针
+
+        jbyte* outData = env->GetByteArrayElements(outFrame, nullptr);
         if (outData == nullptr) {
-            LOGI("outData is nullptr");
+            LOGI("outData is nullptr, failed to get byte array elements");
+            env->DeleteLocalRef(outFrame);
             return -1;
         }
+
+        uint8_t* dst_data[1] = { (uint8_t*)outData };
+        int dst_linesize[1] = { width * 4 };
+
         auto startTime = std::chrono::high_resolution_clock::now();
-        // process
-//        int thread_num = this->thread_num;
-//        for (int th = 0; th < thread_num; th++) {
-//            process_thread[th] = std::thread(
-//                        [&frame, &outData, width, height, th, this]() {
-//                            LOGI( "decode thread :%d ",th );
-//                            auto threadstarttime = std::chrono::high_resolution_clock::now();
-//                            int yp = (height / thread_num) * width * th;
-//                            int endIn = th < (thread_num - 1) ? (height / thread_num) * th + (height / thread_num) : height;
-//                            for (int j = (height / thread_num) * th; j < endIn; j++) {
-//                                int pY = frame->linesize[0] * j;
-//                                int pU = (frame->linesize[1]) * (j >> 1);
-//                                int pV = (frame->linesize[2]) * (j >> 1);
-//                                for (int i = 0; i < width; i++) {
-//                                    int yData = frame->data[0][pY + i];
-//                                    int uData = frame->data[1][pU + (i >> 1)];
-//                                    int vData = frame->data[2][pV + (i >> 1)];
-//                                    outData[yp++] = YUV2RGB(0xff & yData, 0xff & uData, 0xff & vData);
-//                                }
-//                            }
-//                            auto threadendtime = std::chrono::high_resolution_clock::now();
-//                            auto threadduration = std::chrono::duration_cast<std::chrono::milliseconds>(threadendtime - threadstarttime);
-//                            LOGI("threadduration cost Time = %f ms", (double)(threadduration.count()) );
-//                        }
-//                    );
-//        }
-//        for (auto& th: process_thread) th.join();
 
-//        process_thread[0] = std::thread(
-//                [&frame, &outData, width, height]() {
-//                    int yp = 0;
-//                    for (int j = 0; j < height / 2; j++) {
-//                        int pY = frame->linesize[0] * j;
-//                        int pU = (frame->linesize[1]) * (j >> 1);
-//                        int pV = (frame->linesize[2]) * (j >> 1);
-//                        for (int i = 0; i < width; i++) {
-//                            int yData = frame->data[0][pY + i];
-//                            int uData = frame->data[1][pU + (i >> 1)];
-//                            int vData = frame->data[2][pV + (i >> 1)];
-//                            outData[yp++] = YUV2RGB(0xff & yData, 0xff & uData, 0xff & vData);
-//                        }
-//                    }
-//                }
-//            );
-//
-//        process_thread[1] = std::thread(
-//                [&frame, &outData, width, height]() {
-//                    int yp = (height / 2) * width;
-//                    for (int j = height / 2; j < height; j++) {
-//                        int pY = frame->linesize[0] * j;
-//                        int pU = (frame->linesize[1]) * (j >> 1);
-//                        int pV = (frame->linesize[2]) * (j >> 1);
-//                        for (int i = 0; i < width; i++) {
-//                            int yData = frame->data[0][pY + i];
-//                            int uData = frame->data[1][pU + (i >> 1)];
-//                            int vData = frame->data[2][pV + (i >> 1)];
-//                            outData[yp++] = YUV2RGB(0xff & yData, 0xff & uData, 0xff & vData);
-//                        }
-//                    }
-//                }
-//        );
-//        for (auto& th: process_thread) th.join();
-
-        // linesize[0~2] 分别对应了YUV通道
-//        int yp = 0;
-//        for (int j = 0; j < height; j++) {
-//            // 找到该行开始位置的索引
-//            int pY = frame->linesize[0] * j;
-//            int pU = (frame->linesize[1]) * (j >> 1); // 左移一位，就是除以2，因为两行Y共用一行 U 的数据
-//            int pV = (frame->linesize[2]) * (j >> 1); // 左移一位，就是除以2，因为两行Y共用一行 V 的数据
-//            for (int i = 0; i < width; i++) {
-//                int yData = frame->data[0][pY + i];
-//                int uData = frame->data[1][pU + (i >> 1)]; // 左移一位，就是除以2，因为两列Y共用一行 U 的数据
-//                int vData = frame->data[2][pV + (i >> 1)]; // 左移一位，就是除以2，因为两列Y共用一行 V 的数据
-//                outData[yp++] = YUV2RGB(0xff & yData, 0xff & uData, 0xff & vData); // 转化为RGB
-//            }
-//        }
-        std::memcpy(outData, frame->data[0], frame->width * frame->height);
-        std::memcpy(outData + frame->width * frame->height, frame->data[1], frame->width * frame->height / 4);
-        std::memcpy(outData + frame->width * frame->height + frame->width * frame->height / 4, frame->data[2], frame->width * frame->height / 4);
+        sws_scale(this->sws_ctx, (const uint8_t* const*)frame->data, frame->linesize, 0, height,
+                  dst_data, dst_linesize);
 
         auto endTime = std::chrono::high_resolution_clock::now();
         auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime);
-        LOGI("copy avframe to byte[] cost Time = %f ms", (double)(duration.count()));
-        // 释放c++中的数组元素，并同步回java层
-        env->ReleaseByteArrayElements(outFrame, outData, 0);
-        // 调用外部的java函数，将解码得到的数据存放到了队列中；其他的线程检测到这个队列中有数据了，就可以获取数据并进行推理了
-        // this->cls: 表示要调用的方法所属的 Java 类的引用,this->funcMethod: 表示要调用的 Java 静态方法的引用,outFrame: 传递给 Java 静态方法的参数，即解码后的 jintArray
-        // cls是MainAcitivity，method 是 MainActivity中的putData函数，outFrame是传递给java方法的参数（jint* 指针）
+        LOGI("sws_scale YUV->RGBA cost Time = %f ms", (double)(duration.count()));
+
+        env->ReleaseByteArrayElements(outFrame, outData, 0); // Mode 0: copy back and free the buffer
         env->CallStaticVoidMethod(this->cls, this->funcMethod, outFrame);
-        env->DeleteLocalRef(outFrame); // 删除本地引用，防止内存泄漏
+        env->DeleteLocalRef(outFrame);
+
         return 0;
     }
 

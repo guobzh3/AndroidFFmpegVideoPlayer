@@ -52,80 +52,133 @@ Java_com_example_ffmpegvideoplayer_MainActivity_mainDecoder(JNIEnv* env, jobject
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_example_ffmpegvideoplayer_MainActivity_convertFloatToArgbPixels(
+Java_com_example_ffmpegvideoplayer_MainActivity_convertFloatBufferToArgbPixels(
         JNIEnv* env,
-        jobject thiz, /* this */
-        jfloatArray floatArray_j,
-        jintArray intArray_j,
+        jobject thiz,
+        jobject float_buffer_j,
+        jintArray int_array_j,
         jint width,
         jint height,
         jint channels) {
 
-    if (floatArray_j == nullptr || intArray_j == nullptr) {
-        LOGE("convertFloatToArgbPixels: Input or output array is null.");
+    auto* input_floats = static_cast<float*>(env->GetDirectBufferAddress(float_buffer_j));
+    if (input_floats == nullptr) {
+        LOGE("convertFloatBufferToArgbPixels: Failed to get direct buffer address for input.");
         return;
     }
 
-    jfloat* inputFloats = env->GetFloatArrayElements(floatArray_j, nullptr);
-    if (inputFloats == nullptr) {
-        LOGE("convertFloatToArgbPixels: Failed to get float array elements.");
+    jint* output_ints = env->GetIntArrayElements(int_array_j, nullptr);
+    if (output_ints == nullptr) {
+        LOGE("convertFloatBufferToArgbPixels: Failed to get int array elements for output.");
         return;
     }
 
-    jint* outputInts = env->GetIntArrayElements(intArray_j, nullptr);
-    if (outputInts == nullptr) {
-        LOGE("convertFloatToArgbPixels: Failed to get int array elements.");
-        env->ReleaseFloatArrayElements(floatArray_j, inputFloats, JNI_ABORT); // Release the acquired float array
+    int num_pixels = width * height;
+    jsize output_length = env->GetArrayLength(int_array_j);
+    jlong input_capacity = env->GetDirectBufferCapacity(float_buffer_j);
+
+    if (input_capacity < num_pixels * channels * sizeof(float)) {
+        LOGE("convertFloatBufferToArgbPixels: Input float buffer too small.");
+        env->ReleaseIntArrayElements(int_array_j, output_ints, JNI_ABORT);
         return;
     }
 
-    int numPixels = width * height;
-    jsize inputLength = env->GetArrayLength(floatArray_j);
-    jsize outputLength = env->GetArrayLength(intArray_j);
-
-    if (inputLength < numPixels * channels) {
-        LOGE("convertFloatToArgbPixels: Input float array too small. Expected %d, Got %d", numPixels * channels, inputLength);
-        env->ReleaseFloatArrayElements(floatArray_j, inputFloats, JNI_ABORT);
-        env->ReleaseIntArrayElements(intArray_j, outputInts, JNI_ABORT);
-        return;
-    }
-
-    if (outputLength < numPixels) {
-        LOGE("convertFloatToArgbPixels: Output int array too small. Expected %d, Got %d", numPixels, outputLength);
-        env->ReleaseFloatArrayElements(floatArray_j, inputFloats, JNI_ABORT);
-        env->ReleaseIntArrayElements(intArray_j, outputInts, JNI_ABORT);
+    if (output_length < num_pixels) {
+        LOGE("convertFloatBufferToArgbPixels: Output int array too small.");
+        env->ReleaseIntArrayElements(int_array_j, output_ints, JNI_ABORT);
         return;
     }
 
     if (channels != 3) {
-        LOGE("convertFloatToArgbPixels: Unsupported channel count %d. Expected 3 (RGB).", channels);
-        // Fill output with a pattern to indicate error, e.g., magenta
-        for (int i = 0; i < numPixels; ++i) {
-            outputInts[i] = 0xFFFF00FF; // Magenta
+        LOGE("convertFloatBufferToArgbPixels: Unsupported channel count %d. Expected 3 (RGB).", channels);
+        for (int i = 0; i < num_pixels; ++i) {
+            output_ints[i] = 0xFFFF00FF; // Magenta
         }
-        env->ReleaseFloatArrayElements(floatArray_j, inputFloats, JNI_ABORT);
-        env->ReleaseIntArrayElements(intArray_j, outputInts, 0); // Mode 0 to copy back changes if any
+        env->ReleaseIntArrayElements(int_array_j, output_ints, 0);
         return;
     }
 
-    for (int i = 0; i < numPixels; ++i) {
-        // Assuming TFLite output float values are normalized [0,1] or need scaling by 255.
-        // The Java code was doing (int)(float_val * 255.0f)
-        int r = static_cast<int>(inputFloats[i * channels + 0] * 255.0f);
-        int g = static_cast<int>(inputFloats[i * channels + 1] * 255.0f);
-        int b = static_cast<int>(inputFloats[i * channels + 2] * 255.0f);
+    unsigned int num_threads = std::thread::hardware_concurrency();
+    num_threads = (num_threads == 0) ? 4 : num_threads;
+    std::vector<std::thread> threads;
+    int pixels_per_thread = num_pixels / num_threads;
 
-        // Clamp values to [0, 255]
-//        r = (r < 0) ? 0 : ((r > 255) ? 255 : r);
-//        g = (g < 0) ? 0 : ((g > 255) ? 255 : g);
-//        b = (b < 0) ? 0 : ((b > 255) ? 255 : b);
+    for (unsigned int i = 0; i < num_threads; ++i) {
+        int start_pixel = i * pixels_per_thread;
+        int end_pixel = (i == num_threads - 1) ? num_pixels : start_pixel + pixels_per_thread;
 
-        outputInts[i] = (0xFF << 24) | (r << 16) | (g << 8) | b; // ARGB
+        threads.emplace_back([=]() {
+            for (int p = start_pixel; p < end_pixel; ++p) {
+                int r = static_cast<int>(input_floats[p * channels + 0] * 255.0f);
+                int g = static_cast<int>(input_floats[p * channels + 1] * 255.0f);
+                int b = static_cast<int>(input_floats[p * channels + 2] * 255.0f);
+
+//                r = (r < 0) ? 0 : ((r > 255) ? 255 : r);
+//                g = (g < 0) ? 0 : ((g > 255) ? 255 : g);
+//                b = (b < 0) ? 0 : ((b > 255) ? 255 : b);
+
+                output_ints[p] = (0xFF << 24) | (r << 16) | (g << 8) | b;
+            }
+        });
     }
 
-    // Release array elements. Mode 0 means copy back changes to intArray_j.
-    env->ReleaseFloatArrayElements(floatArray_j, inputFloats, JNI_ABORT); // Input floats are not modified.
-    env->ReleaseIntArrayElements(intArray_j, outputInts, 0);
+    for (auto& t : threads) {
+        if (t.joinable()) {
+            t.join();
+        }
+    }
+
+    env->ReleaseIntArrayElements(int_array_j, output_ints, 0);
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_example_ffmpegvideoplayer_MainActivity_cropAndNormalizeRgbaToRgbFloat(
+        JNIEnv* env,
+        jobject thiz,
+        jobject input_buffer_j,
+        jobject output_buffer_j,
+        jint crop_x, jint crop_y,
+        jint crop_w, jint crop_h,
+        jint input_w) {
+
+    auto* input_buf = static_cast<uint8_t*>(env->GetDirectBufferAddress(input_buffer_j));
+    auto* output_buf = static_cast<float*>(env->GetDirectBufferAddress(output_buffer_j));
+
+    if (input_buf == nullptr || output_buf == nullptr) {
+        LOGE("cropAndNormalizeRgbaToRgbFloat: Failed to get direct buffer address.");
+        return;
+    }
+
+    unsigned int num_threads = std::thread::hardware_concurrency();
+    num_threads = (num_threads == 0) ? 4 : num_threads; // Fallback to 4 threads if detection fails
+    std::vector<std::thread> threads;
+
+    int rows_per_thread = crop_h / num_threads;
+
+    for (unsigned int i = 0; i < num_threads; ++i) {
+        int start_row = i * rows_per_thread;
+        int end_row = (i == num_threads - 1) ? crop_h : start_row + rows_per_thread;
+
+        threads.emplace_back([=]() {
+            for (int y = start_row; y < end_row; ++y) {
+                for (int x = 0; x < crop_w; ++x) {
+                    int input_pixel_index = ((crop_y + y) * input_w + (crop_x + x)) * 4; // RGBA
+                    int output_pixel_index = (y * crop_w + x) * 3; // RGB
+
+                    // RGBA to RGB and normalize
+                    output_buf[output_pixel_index + 0] = input_buf[input_pixel_index + 0] / 255.0f; // R
+                    output_buf[output_pixel_index + 1] = input_buf[input_pixel_index + 1] / 255.0f; // G
+                    output_buf[output_pixel_index + 2] = input_buf[input_pixel_index + 2] / 255.0f; // B
+                }
+            }
+        });
+    }
+
+    for (auto& t : threads) {
+        if (t.joinable()) {
+            t.join();
+        }
+    }
 }
 
 

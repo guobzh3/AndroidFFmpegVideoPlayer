@@ -35,6 +35,11 @@ public class OpenGLImageProcessor {
     private EGLConfig eglConfig;
     private EGLSurface eglSurface = EGL14.EGL_NO_SURFACE;
 
+    // ByteBuffer pooling
+    private BlockingQueue<ByteBuffer> availableBuffers;
+    private int bufferCapacity;
+
+
     private int programHandle;
     private int positionHandle;
     private int texCoordHandle;
@@ -427,15 +432,54 @@ public class OpenGLImageProcessor {
         return !checkGlError("Update Input Texture with texSubImage2D");
     }
 
-    public Bitmap process(Bitmap inputBitmap) {
-        long totalStartTime = System.nanoTime();
-        long dataUploadTimeNs, processTimeNs, dataReadbackTimeNs;
+    private boolean updateInputTexture(ByteBuffer buffer, int width, int height) {
+        if (buffer == null) {
+            Log.e(TAG, "Cannot update texture from null buffer.");
+            return false;
+        }
+        if (currentInputTextureId == 0) {
+            Log.e(TAG, "Input texture ID is not initialized.");
+            return false;
+        }
+        if (buffer.capacity() < width * height * 4) {
+            Log.e(TAG, "Buffer capacity is smaller than required for texture update.");
+            return false;
+        }
 
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, currentInputTextureId);
+        buffer.position(0);
+        GLES20.glTexSubImage2D(GLES20.GL_TEXTURE_2D, 0, 0, 0, width, height, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, buffer);
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0); // Unbind
+
+        return !checkGlError("Update Input Texture with texSubImage2D from ByteBuffer");
+    }
+
+    public Bitmap process(Bitmap inputBitmap) {
         if (inputBitmap == null || inputBitmap.isRecycled()) {
             Log.e(TAG, "Input bitmap is null or recycled.");
             return null;
         }
-        if (eglDisplay == EGL14.EGL_NO_DISPLAY || eglContext == EGL14.EGL_NO_CONTEXT || currentInputTextureId == 0 ) {
+        // This is a convenience wrapper. We can convert the bitmap to a bytebuffer and use the main process method.
+        // This is inefficient and should be avoided in production.
+        ByteBuffer byteBuffer = ByteBuffer.allocateDirect(inputBitmap.getByteCount());
+        inputBitmap.copyPixelsToBuffer(byteBuffer);
+        
+        Bitmap result = process(byteBuffer, inputBitmap.getWidth(), inputBitmap.getHeight());
+        
+        // No need to release the byteBuffer as it's allocated on the stack and will be garbage collected.
+
+        return result;
+    }
+
+    public Bitmap process(ByteBuffer inputBuffer, int inputWidth, int inputHeight) {
+        long totalStartTime = System.nanoTime();
+        long dataUploadTimeNs, processTimeNs, dataReadbackTimeNs;
+
+        if (inputBuffer == null) {
+            Log.e(TAG, "Input buffer is null.");
+            return null;
+        }
+        if (eglDisplay == EGL14.EGL_NO_DISPLAY || eglContext == EGL14.EGL_NO_CONTEXT || currentInputTextureId == 0) {
             Log.e(TAG, "EGL not setup, resources not initialized, or already released.");
             return null;
         }
@@ -461,8 +505,8 @@ public class OpenGLImageProcessor {
         }
 
         long updateTextureStartTime = System.nanoTime();
-        if (!updateInputTexture(inputBitmap)) {
-            Log.e(TAG, "Failed to update input texture.");
+        if (!updateInputTexture(inputBuffer, inputWidth, inputHeight)) {
+            Log.e(TAG, "Failed to update input texture from byte buffer.");
             return null;
         }
         dataUploadTimeNs = System.nanoTime() - updateTextureStartTime;
@@ -485,8 +529,8 @@ public class OpenGLImageProcessor {
         GLES20.glUniform1i(inputTextureHandle, 0);
 
         // Pass texel size for bicubic interpolation
-        float texelWidth = 1.0f / inputBitmap.getWidth();
-        float texelHeight = 1.0f / inputBitmap.getHeight();
+        float texelWidth = 1.0f / inputWidth;
+        float texelHeight = 1.0f / inputHeight;
         GLES20.glUniform2f(texelSizeHandle, texelWidth, texelHeight);
 
         long drawArraysStartTime = System.nanoTime();

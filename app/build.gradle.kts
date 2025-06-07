@@ -71,6 +71,8 @@ dependencies {
     implementation("androidx.graphics:graphics-path:1.0.1")
     implementation("androidx.graphics:graphics-shapes:1.1.0-alpha01")
 
+    implementation("androidx.camera:camera-core:1.3.4")
+
 //    implementation(libs.androidx.core.ktx)
     implementation(libs.kotlin.stdlib) // 添加显式的 kotlin-stdlib 依赖
 

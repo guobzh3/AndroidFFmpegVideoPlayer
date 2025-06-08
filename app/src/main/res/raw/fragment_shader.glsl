@@ -52,6 +52,18 @@ vec4 cubic(vec4 p0, vec4 p1, vec4 p2, vec4 p3, float t) {
     return t * t * t * a + t * t * b + t * c + d;
 }
 
+vec4 cubic2(vec4 p0, vec4 p1, vec4 p2, vec4 p3, float t) {
+    // The polynomial is of the form: a*t^3 + b*t^2 + c*t + d
+    // The coefficients are derived from the Catmull-Rom spline constraints.
+    // TODO: Train a coord matrix here.
+    vec4 a = -0.5*p0 + 1.5*p1 - 1.5*p2 + 0.5*p3;
+    vec4 b =  1.0*p0 - 2.5*p1 + 2.0*p2 - 0.5*p3;
+    vec4 c = -0.5*p0 + 0.0*p1 + 0.5*p2 + 0.0*p3;
+    vec4 d =  0.0*p0 + 1.0*p1 + 0.0*p2 + 0.0*p3;
+
+    return t * t * t * a + t * t * b + t * c + d;
+}
+
 // --- BICUBIC UPSCALE FUNCTION ---
 // Performs bicubic interpolation on a texture.
 // @param tex: The source texture sampler.

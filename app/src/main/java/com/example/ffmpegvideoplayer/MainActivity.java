@@ -53,13 +53,14 @@ import com.example.ffmpegvideoplayer.OpenGLImageProcessor;
 
 public class MainActivity extends AppCompatActivity {
 
-    private static final int QUEUE_CAPACITY = 16;
+    private static final int QUEUE_CAPACITY = 12;
     private static BlockingQueue<SharedByteBuffer> rgbFrameQueueForTfInput = new ArrayBlockingQueue<>(QUEUE_CAPACITY);
     private static BlockingQueue<SharedByteBuffer> rgbFrameQueueForUpsample = new ArrayBlockingQueue<>(QUEUE_CAPACITY);
     private static BlockingQueue<TensorImage> modelInputQueue = new ArrayBlockingQueue<>(QUEUE_CAPACITY);
     private static BlockingQueue<TensorBuffer> modelOutputQueue = new ArrayBlockingQueue<>(QUEUE_CAPACITY);
     private static BlockingQueue<InferenceResult> inferenceResultQueue = new ArrayBlockingQueue<>(QUEUE_CAPACITY);
     private static BlockingQueue<InferenceResult> inferenceResultPool = new ArrayBlockingQueue<>(QUEUE_CAPACITY);
+    private static BlockingQueue<ByteBuffer> rgbaPatchBufferPool = new ArrayBlockingQueue<>(QUEUE_CAPACITY);
     private static final ArrayBlockingQueue<Bitmap> displayQueue = new ArrayBlockingQueue<>(1);
     private static BlockingQueue<TensorImage> tensorImagePool = new ArrayBlockingQueue<>(QUEUE_CAPACITY);
  
@@ -87,11 +88,17 @@ public class MainActivity extends AppCompatActivity {
     private final Deque<Long> recentInferenceTimes = new ConcurrentLinkedDeque<>();
     private final Deque<Long> recentUpsamplePassTimes = new ConcurrentLinkedDeque<>();
     private final Deque<Long> recentCompositePassTimes = new ConcurrentLinkedDeque<>();
+    private static final Deque<Long> recentYuvToRgbTimes = new ConcurrentLinkedDeque<>();
+    private final Deque<Long> recentPrepareTfInputProcessingTimes = new ConcurrentLinkedDeque<>();
+    private final Deque<Long> recentPatchDataProcessingTimes = new ConcurrentLinkedDeque<>();
 
     // Atomics for holding 1-second averages (in microseconds)
     private final AtomicLong avgInferenceTimeUs = new AtomicLong(0);
     private final AtomicLong avgUpsamplePassTimeUs = new AtomicLong(0);
     private final AtomicLong avgCompositePassTimeUs = new AtomicLong(0);
+    private final AtomicLong avgYuvToRgbTimeUs = new AtomicLong(0);
+    private final AtomicLong avgPrepareTfInputProcessingTimeUs = new AtomicLong(0);
+    private final AtomicLong avgPatchDataProcessingTimeUs = new AtomicLong(0);
  
  
     // A simple data class to hold the results of the inference thread
@@ -145,7 +152,6 @@ public class MainActivity extends AppCompatActivity {
 
     private InferenceTFLite srTFLite;
 
-    private int[] sr_patch_pixels;
 
     // private ImageProcessor imageProcessorTFLiteInput; // No longer needed
 
@@ -217,7 +223,6 @@ public class MainActivity extends AppCompatActivity {
 
         fpsTextView = findViewById(R.id.inference_time);
 
-        sr_patch_pixels = new int[TF_OUTPUT_W * TF_OUTPUT_H];
 
         // imageProcessorTFLiteInput is no longer needed as normalization is done manually.
 
@@ -240,6 +245,7 @@ public class MainActivity extends AppCompatActivity {
 
         // Initialize pools to avoid allocation in the loops.
         TensorBuffer primeBuffer = TensorBuffer.createFixedSize(new int[]{TF_INPUT_H, TF_INPUT_W, 3}, DataType.FLOAT32);
+        int patchBufferSize = TF_OUTPUT_W * TF_OUTPUT_H * 4;
         for (int i = 0; i < QUEUE_CAPACITY; i++) {
             // Pool for the data structure that holds the patch data and metadata
             InferenceResult res = new InferenceResult();
@@ -249,6 +255,8 @@ public class MainActivity extends AppCompatActivity {
             TensorImage ti = new TensorImage(DataType.FLOAT32);
             ti.load(primeBuffer);
             tensorImagePool.offer(ti);
+
+            rgbaPatchBufferPool.offer(ByteBuffer.allocateDirect(patchBufferSize).order(ByteOrder.nativeOrder()));
         }
 
         java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(4);
@@ -320,6 +328,7 @@ public class MainActivity extends AppCompatActivity {
 
                 long loopEnd = System.nanoTime();
                 prepareTfInputLoopTimeMs.set((loopEnd - loopStart) / 1_000_000);
+                recentPrepareTfInputProcessingTimes.add(processingEnd - processingStart);
 
             } catch (InterruptedException e) {
                 Log.w(TAG_TF_INPUT, "Loop interrupted.");
@@ -389,8 +398,10 @@ public class MainActivity extends AppCompatActivity {
                     long pass2End = System.nanoTime();
                     recentCompositePassTimes.add(pass2End - pass2Start);
 
-                    // CRITICAL: Return the result container to its pool.
+                    // CRITICAL: Return the result container and its buffer to their respective pools.
+                    rgbaPatchBufferPool.offer(inferenceResult.patchBuffer);
                     inferenceResultPool.offer(inferenceResult);
+                    inferenceResult = null; // Avoid accidental reuse
 
                     long gpuWorkEnd = System.nanoTime();
                     // This is not a primary metric, so we don't average it.
@@ -478,15 +489,22 @@ public class MainActivity extends AppCompatActivity {
 
                 long processStart = System.nanoTime();
 
-                // 2. Get the original buffer directly. No copy needed.
+                // 2. Get the original buffer and a destination buffer for conversion.
                 ByteBuffer originalBuffer = hwcOutputTensorBuffer.getBuffer();
                 originalBuffer.rewind();
 
-                // 3. Get a result container from the pool and populate it.
+                ByteBuffer rgbaBuffer = rgbaPatchBufferPool.take();
+                rgbaBuffer.rewind();
+
+                // 3. Perform the conversion from Float RGB to Uint8 RGBA.
+                convertFloatRgbToRgbaUint8(originalBuffer, rgbaBuffer, TF_OUTPUT_W, TF_OUTPUT_H);
+                rgbaBuffer.rewind();
+
+                // 4. Get a result container from the pool and populate it.
                 InferenceResult result = inferenceResultPool.take();
-                result.patchBuffer = originalBuffer;
-                result.patchWidth = hwcOutputTensorBuffer.getShape()[2];
-                result.patchHeight = hwcOutputTensorBuffer.getShape()[1];
+                result.patchBuffer = rgbaBuffer; // Use the newly converted buffer
+                result.patchWidth = TF_OUTPUT_W;
+                result.patchHeight = TF_OUTPUT_H;
 
                 float rectW = (float)TF_OUTPUT_W / video_output_shape.getWidth();
                 float rectH = (float)TF_OUTPUT_H / video_output_shape.getHeight();
@@ -498,7 +516,7 @@ public class MainActivity extends AppCompatActivity {
                 result.patchRect[2] = rectW;
                 result.patchRect[3] = rectH;
 
-                // 4. Queue the result for the rendering thread
+                // 5. Queue the result for the rendering thread
                 inferenceResultQueue.put(result);
 
                 long processEnd = System.nanoTime();
@@ -506,6 +524,7 @@ public class MainActivity extends AppCompatActivity {
 
                 long loopEnd = System.nanoTime();
                 patchDataLoopTimeMs.set((loopEnd - loopStart) / 1_000_000);
+                recentPatchDataProcessingTimes.add(processEnd - processStart);
 
             } catch (InterruptedException e) {
                 Log.w(TAG_AFTER_PROC, "Loop interrupted.");
@@ -531,10 +550,13 @@ public class MainActivity extends AppCompatActivity {
                 double avgSrMs = avgInferenceTimeUs.get() / 1000.0;
                 double avgBiMs = avgUpsamplePassTimeUs.get() / 1000.0;
                 double avgCompMs = avgCompositePassTimeUs.get() / 1000.0;
+                double avgYuvMs = avgYuvToRgbTimeUs.get() / 1000.0;
+                double avgTfInProcMs = avgPrepareTfInputProcessingTimeUs.get() / 1000.0; // Changed to ProcessingTime
+                double avgPatchProcMs = avgPatchDataProcessingTimeUs.get() / 1000.0; // Changed to ProcessingTime
 
                 String displayText = String.format(Locale.US,
-                        "SR: %.2f | BI: %.2f | Comp: %.2f",
-                        avgSrMs, avgBiMs, avgCompMs
+                        "YUV: %.2f | TFIn: %.2f | SR: %.2f | BI: %.2f | Patch: %.2f | Comp: %.2f", // Reordered
+                        avgYuvMs, avgTfInProcMs, avgSrMs, avgBiMs, avgPatchProcMs, avgCompMs // Reordered
                 );
                 fpsTextView.setText(displayText);
             }
@@ -566,18 +588,21 @@ public class MainActivity extends AppCompatActivity {
         avgInferenceTimeUs.set(calculateAndClearAverage(recentInferenceTimes));
         avgUpsamplePassTimeUs.set(calculateAndClearAverage(recentUpsamplePassTimes));
         avgCompositePassTimeUs.set(calculateAndClearAverage(recentCompositePassTimes));
+        avgYuvToRgbTimeUs.set(calculateAndClearAverage(recentYuvToRgbTimes));
+        avgPrepareTfInputProcessingTimeUs.set(calculateAndClearAverage(recentPrepareTfInputProcessingTimes));
+        avgPatchDataProcessingTimeUs.set(calculateAndClearAverage(recentPatchDataProcessingTimes));
 
         String logMsg = String.format(Locale.US,
                 """
-                        TICK --- Loops(ms): [Dec: %.2f, TFIn: %d, Infer: %d, Patch: %d, GL: %d] ---\s
+                        TICK --- Loops(ms): [Dec: %.2f, TFIn: %.2f, Infer: %d, Patch: %.2f, GL: %d] ---\s
                         Takes(ms): [Read: %.2f, TFIn: %d, Infer: %d, Patch: %d, GL: %d] ---\s
                         Process(ms): [YUV: %.2f, TFIn: %d, SR: %.2f, Patch: %d, BI: %.2f, Comp: %.2f] ---\s
                         Queues: [tfIn: %d, upsample: %d, modelIn: %d, modelOut: %d, result: %d]""",
                 // Loop Times
                 decoderLoopTimeUs.get() / 1000.0,
-                prepareTfInputLoopTimeMs.get(),
+                avgPrepareTfInputProcessingTimeUs.get() / 1000.0, // Changed to avg
                 inferenceLoopTimeMs.get(),
-                patchDataLoopTimeMs.get(),
+                avgPatchDataProcessingTimeUs.get() / 1000.0, // Changed to avg
                 upsampleLoopTimeMs.get(),
                 // Take Times
                 decoderReadTimeUs.get() / 1000.0,
@@ -586,7 +611,7 @@ public class MainActivity extends AppCompatActivity {
                 patchDataTakeTimeMs.get(),
                 upsampleTakeTimeMs.get(),
                 // Processing Times
-                yuvToRgbTimeUs.get() / 1000.0,
+                avgYuvToRgbTimeUs.get() / 1000.0, // Changed to avg
                 prepareTfInputProcessingTimeMs.get(),
                 avgInferenceTimeUs.get() / 1000.0,
                 patchDataProcessTimeMs.get(),
@@ -610,6 +635,11 @@ public class MainActivity extends AppCompatActivity {
 
     public static void updateYuvToRgbTime(long durationUs) {
         yuvToRgbTimeUs.set(durationUs);
+        // Assuming durationUs is in microseconds, convert to nanoseconds for the Deque
+        // or ensure consistency in units. The Deques are currently in nanoseconds.
+        // Let's convert to nanoseconds for consistency.
+        // The original recent*Times deques store nanoseconds, so let's convert durationUs to nanoseconds.
+        recentYuvToRgbTimes.add(durationUs * 1000);
     }
 
     // 从 JNI 调用, now receives RGBA data
@@ -712,6 +742,6 @@ public class MainActivity extends AppCompatActivity {
     // 本地方法声明
     public native void mainDecoder(String url);
     private native void cropAndNormalizeRgbaToRgbFloat(ByteBuffer input, ByteBuffer output, int cropX, int cropY, int cropW, int cropH, int inputW);
-    private native void convertFloatBufferToArgbPixels(ByteBuffer floatBuffer, int[] intArray, int width, int height, int channels);
+    private native void convertFloatRgbToRgbaUint8(ByteBuffer floatRgbInput, ByteBuffer rgbaUint8Output, int width, int height);
 }
 

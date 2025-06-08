@@ -32,10 +32,18 @@ extern  "C" {
 #include <chrono>
 #include <android/log.h>
 #include "Streamplayer.h" // streamplayer 类实现在这个头文件中
+#include "ThreadPool.h"
+#include <future>
 
 #define LOG_TAG "MyNativeCode"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
+
+// Global Thread Pool for JNI functions to avoid thread creation overhead.
+// The number of threads can be tuned for optimal performance.
+// Using a fixed number (e.g., 2 or 4) can sometimes provide more stable performance
+// than relying on hardware_concurrency(), which might fluctuate.
+static ThreadPool pool(4);
 
 // Android NDK 相关
 JavaVM* javaVM;
@@ -52,83 +60,79 @@ Java_com_example_ffmpegvideoplayer_MainActivity_mainDecoder(JNIEnv* env, jobject
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_example_ffmpegvideoplayer_MainActivity_convertFloatBufferToArgbPixels(
+Java_com_example_ffmpegvideoplayer_MainActivity_convertFloatRgbToRgbaUint8(
         JNIEnv* env,
         jobject thiz,
-        jobject float_buffer_j,
-        jintArray int_array_j,
+        jobject float_rgb_input_j,
+        jobject rgba_uint8_output_j,
         jint width,
-        jint height,
-        jint channels) {
+        jint height) {
 
-    auto* input_floats = static_cast<float*>(env->GetDirectBufferAddress(float_buffer_j));
+    auto* input_floats = static_cast<float*>(env->GetDirectBufferAddress(float_rgb_input_j));
     if (input_floats == nullptr) {
-        LOGE("convertFloatBufferToArgbPixels: Failed to get direct buffer address for input.");
+        LOGE("convertFloatRgbToRgbaUint8: Failed to get direct buffer address for input.");
         return;
     }
 
-    jint* output_ints = env->GetIntArrayElements(int_array_j, nullptr);
-    if (output_ints == nullptr) {
-        LOGE("convertFloatBufferToArgbPixels: Failed to get int array elements for output.");
+    auto* output_bytes = static_cast<uint8_t*>(env->GetDirectBufferAddress(rgba_uint8_output_j));
+    if (output_bytes == nullptr) {
+        LOGE("convertFloatRgbToRgbaUint8: Failed to get direct buffer address for output.");
         return;
     }
 
     int num_pixels = width * height;
-    jsize output_length = env->GetArrayLength(int_array_j);
-    jlong input_capacity = env->GetDirectBufferCapacity(float_buffer_j);
+    jlong input_capacity = env->GetDirectBufferCapacity(float_rgb_input_j);
+    jlong output_capacity = env->GetDirectBufferCapacity(rgba_uint8_output_j);
 
-    if (input_capacity < num_pixels * channels * sizeof(float)) {
-        LOGE("convertFloatBufferToArgbPixels: Input float buffer too small.");
-        env->ReleaseIntArrayElements(int_array_j, output_ints, JNI_ABORT);
+    if (input_capacity < num_pixels * 3 * sizeof(float)) {
+        LOGE("convertFloatRgbToRgbaUint8: Input float buffer too small. Has %ld, needs %d", input_capacity, num_pixels * 3 * sizeof(float));
         return;
     }
 
-    if (output_length < num_pixels) {
-        LOGE("convertFloatBufferToArgbPixels: Output int array too small.");
-        env->ReleaseIntArrayElements(int_array_j, output_ints, JNI_ABORT);
+    if (output_capacity < num_pixels * 4) {
+        LOGE("convertFloatRgbToRgbaUint8: Output byte buffer too small. Has %ld, needs %d", output_capacity, num_pixels * 4);
         return;
     }
 
-    if (channels != 3) {
-        LOGE("convertFloatBufferToArgbPixels: Unsupported channel count %d. Expected 3 (RGB).", channels);
-        for (int i = 0; i < num_pixels; ++i) {
-            output_ints[i] = 0xFFFF00FF; // Magenta
-        }
-        env->ReleaseIntArrayElements(int_array_j, output_ints, 0);
-        return;
-    }
-
-    unsigned int num_threads = std::thread::hardware_concurrency();
-    num_threads = (num_threads == 0) ? 4 : num_threads;
-    std::vector<std::thread> threads;
+    const unsigned int num_threads = 2; // Matching the pool size for this task
+    std::vector<std::future<void>> futures;
     int pixels_per_thread = num_pixels / num_threads;
 
     for (unsigned int i = 0; i < num_threads; ++i) {
         int start_pixel = i * pixels_per_thread;
         int end_pixel = (i == num_threads - 1) ? num_pixels : start_pixel + pixels_per_thread;
 
-        threads.emplace_back([=]() {
-            for (int p = start_pixel; p < end_pixel; ++p) {
-                int r = static_cast<int>(input_floats[p * channels + 0] * 255.0f);
-                int g = static_cast<int>(input_floats[p * channels + 1] * 255.0f);
-                int b = static_cast<int>(input_floats[p * channels + 2] * 255.0f);
+        futures.emplace_back(
+            pool.enqueue([=] {
+                for (int p = start_pixel; p < end_pixel; ++p) {
+                    // Read float RGB
+                    float r_float = input_floats[p * 3 + 0];
+                    float g_float = input_floats[p * 3 + 1];
+                    float b_float = input_floats[p * 3 + 2];
 
-//                r = (r < 0) ? 0 : ((r > 255) ? 255 : r);
-//                g = (g < 0) ? 0 : ((g > 255) ? 255 : g);
-//                b = (b < 0) ? 0 : ((b > 255) ? 255 : b);
+                    // Convert to uint8_t
+                    int r_int = static_cast<int>(r_float * 255.0f);
+                    int g_int = static_cast<int>(g_float * 255.0f);
+                    int b_int = static_cast<int>(b_float * 255.0f);
 
-                output_ints[p] = (0xFF << 24) | (r << 16) | (g << 8) | b;
-            }
-        });
+                    // Directly cast. Note: Clamping might be safer if input isn't guaranteed to be [0,1]
+                    uint8_t r = r_int;
+                    uint8_t g = g_int;
+                    uint8_t b = b_int;
+
+                    // Write uint8_t RGBA
+                    output_bytes[p * 4 + 0] = r;
+                    output_bytes[p * 4 + 1] = g;
+                    output_bytes[p * 4 + 2] = b;
+                    output_bytes[p * 4 + 3] = 255; // Alpha
+                }
+            })
+        );
     }
 
-    for (auto& t : threads) {
-        if (t.joinable()) {
-            t.join();
-        }
+    for (auto& f : futures) {
+        f.get(); // Wait for the task to complete
     }
-
-    env->ReleaseIntArrayElements(int_array_j, output_ints, 0);
 }
 
 extern "C" JNIEXPORT void JNICALL
@@ -149,35 +153,33 @@ Java_com_example_ffmpegvideoplayer_MainActivity_cropAndNormalizeRgbaToRgbFloat(
         return;
     }
 
-    unsigned int num_threads = std::thread::hardware_concurrency();
-    num_threads = (num_threads == 0) ? 4 : num_threads; // Fallback to 4 threads if detection fails
-    std::vector<std::thread> threads;
-
+    const unsigned int num_threads = 2; // Matching the pool size for this task
+    std::vector<std::future<void>> futures;
     int rows_per_thread = crop_h / num_threads;
 
     for (unsigned int i = 0; i < num_threads; ++i) {
         int start_row = i * rows_per_thread;
         int end_row = (i == num_threads - 1) ? crop_h : start_row + rows_per_thread;
 
-        threads.emplace_back([=]() {
-            for (int y = start_row; y < end_row; ++y) {
-                for (int x = 0; x < crop_w; ++x) {
-                    int input_pixel_index = ((crop_y + y) * input_w + (crop_x + x)) * 4; // RGBA
-                    int output_pixel_index = (y * crop_w + x) * 3; // RGB
+        futures.emplace_back(
+            pool.enqueue([=] {
+                for (int y = start_row; y < end_row; ++y) {
+                    for (int x = 0; x < crop_w; ++x) {
+                        int input_pixel_index = ((crop_y + y) * input_w + (crop_x + x)) * 4; // RGBA
+                        int output_pixel_index = (y * crop_w + x) * 3; // RGB
 
-                    // RGBA to RGB and normalize
-                    output_buf[output_pixel_index + 0] = input_buf[input_pixel_index + 0] / 255.0f; // R
-                    output_buf[output_pixel_index + 1] = input_buf[input_pixel_index + 1] / 255.0f; // G
-                    output_buf[output_pixel_index + 2] = input_buf[input_pixel_index + 2] / 255.0f; // B
+                        // RGBA to RGB and normalize
+                        output_buf[output_pixel_index + 0] = input_buf[input_pixel_index + 0] / 255.0f; // R
+                        output_buf[output_pixel_index + 1] = input_buf[input_pixel_index + 1] / 255.0f; // G
+                        output_buf[output_pixel_index + 2] = input_buf[input_pixel_index + 2] / 255.0f; // B
+                    }
                 }
-            }
-        });
+            })
+        );
     }
 
-    for (auto& t : threads) {
-        if (t.joinable()) {
-            t.join();
-        }
+    for (auto& f : futures) {
+        f.get(); // Wait for the task to complete
     }
 }
 

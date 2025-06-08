@@ -152,7 +152,7 @@ public class OpenGLImageProcessor {
 
         // --- Create all necessary textures ---
         inputVideoTextureId = createTexture(inputWidth, inputHeight, false);
-        srPatchTextureId = createTexture(0, 0, true); // SR patch dimensions are dynamic, will be defined later
+        srPatchTextureId = createTexture(0, 0, false); // SR patch is now RGBA8, not float
         upscaledTexture[0] = createTexture(outputWidth, outputHeight, false);
 
         // --- Setup FBO for Pass 1 (Upscaling) ---
@@ -287,17 +287,17 @@ public class OpenGLImageProcessor {
 
         // Upload SR patch data to its texture
         GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, srPatchTextureId);
-        // The model output is RGB Float.
+        // The patch buffer is now RGBA Uint8.
         // Optimize texture upload: use glTexSubImage2D if patch size hasn't changed.
         long t0 = System.nanoTime();
         if (patchWidth != lastPatchWidth || patchHeight != lastPatchHeight) {
             // If size changes, we must re-specify the texture storage.
-            GLES30.glTexImage2D(GLES30.GL_TEXTURE_2D, 0, GLES30.GL_RGB32F, patchWidth, patchHeight, 0, GLES30.GL_RGB, GLES30.GL_FLOAT, srPatchBuffer);
+            GLES30.glTexImage2D(GLES30.GL_TEXTURE_2D, 0, GLES30.GL_RGBA, patchWidth, patchHeight, 0, GLES30.GL_RGBA, GLES30.GL_UNSIGNED_BYTE, srPatchBuffer);
             lastPatchWidth = patchWidth;
             lastPatchHeight = patchHeight;
         } else if (srPatchBuffer != null) {
             // If size is the same and we have a buffer, just update the texture content.
-            GLES30.glTexSubImage2D(GLES30.GL_TEXTURE_2D, 0, 0, 0, patchWidth, patchHeight, GLES30.GL_RGB, GLES30.GL_FLOAT, srPatchBuffer);
+            GLES30.glTexSubImage2D(GLES30.GL_TEXTURE_2D, 0, 0, 0, patchWidth, patchHeight, GLES30.GL_RGBA, GLES30.GL_UNSIGNED_BYTE, srPatchBuffer);
         }
         long t1 = System.nanoTime();
         // Log.d(TAG, "SR Patch texture upload took: " + (t1 - t0) / 1_000_000 + " ms");

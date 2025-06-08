@@ -23,14 +23,17 @@ extern  "C" {
 #include <android/log.h>
 
 #define LOG_TAG "MyNativeCode"
-#define TIME_TAG "time"
-#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TIME_TAG, __VA_ARGS__)
+#define TIME_TAG "PerfTime" // Consistent with Java tags
+#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
+#define LOG_TIME(...) __android_log_print(ANDROID_LOG_INFO, TIME_TAG, __VA_ARGS__)
 
 class StreamPlayer {
 public:
     JNIEnv * env;
-    jclass cls;
-    jmethodID funcMethod;
+    jclass mainActivityClass;
+    jmethodID putDataMethod;
+    jmethodID updateDecoderTimingsMethod;
+    jmethodID updateYuvToRgbTimeMethod;
 
     AVFormatContext* deFormatc; // 是一个FormatContext
     AVCodecContext* deCodecc; // 是一个CodecContext
@@ -54,19 +57,31 @@ public:
             throw std::runtime_error("Failed to attach current thread");
         }
         // 找到这个java中中class ? 这个有什么用？
-        cls = env->FindClass("com/example/ffmpegvideoplayer/MainActivity");
+        mainActivityClass = env->FindClass("com/example/ffmpegvideoplayer/MainActivity");
+        if (mainActivityClass == nullptr) {
+            // ... (error handling as before)
+            throw std::runtime_error("Failed to find class MainActivity");
+        }
 
-        if (cls == nullptr) {
-            LOGI("Failed to find class MainActivity");
+        // Make it a global reference to be safe across threads, though in this specific
+        // implementation it might not be strictly necessary as JNIEnv is thread-local.
+        mainActivityClass = (jclass)env->NewGlobalRef(mainActivityClass);
+
+
+        // Get method IDs for all callbacks
+        putDataMethod = env->GetStaticMethodID(mainActivityClass, "putData", "([B)V");
+        updateDecoderTimingsMethod = env->GetStaticMethodID(mainActivityClass, "updateDecoderTimings", "(JJ)V");
+        updateYuvToRgbTimeMethod = env->GetStaticMethodID(mainActivityClass, "updateYuvToRgbTime", "(J)V");
+
+        if (putDataMethod == nullptr || updateDecoderTimingsMethod == nullptr || updateYuvToRgbTimeMethod == nullptr) {
+            LOGI("Failed to find one or more callback methods in MainActivity");
             if (env->ExceptionCheck()) {
                 env->ExceptionDescribe();
                 env->ExceptionClear();
             }
-            javaVM->DetachCurrentThread(); // 通过 JNI 附加的线程必须在退出之前调用 DetachCurrentThread()
-            throw std::runtime_error("Failed to find class MainActivity");
+            javaVM->DetachCurrentThread();
+            throw std::runtime_error("Failed to find JNI callback methods");
         }
-        // 获取在MainActivity中定义的 putData 方法
-        this->funcMethod = env->GetStaticMethodID(cls, "putData", "([B)V");
 
         this->frame_decoded_count = 0;
         this->sws_ctx = nullptr;
@@ -74,7 +89,7 @@ public:
         this->deCodecc = createCodecc(this->deFormatc); // 用于对packet进行解码，avcodec_send_packet(this->deCodecc, received_packet); avcodec_receive_frame(this->deCodecc, input_frame);
 
         // multithread yuv2rgb
-        this->thread_num = 8;
+        this->thread_num = 2;
         this->process_thread = std::vector<std::thread>(this->thread_num);
     }
 
@@ -158,24 +173,35 @@ public:
         int packet_num = 0;
         bool stop = false;
         while (!stop) {
-            int ret = av_read_frame(this->deFormatc, input_packet); // 使用函数 av_read_frame 读取帧数据来填充数据包，注意第一个参数是AvFormatContext*
+            auto loopStart = std::chrono::high_resolution_clock::now();
+
+            auto readStart = std::chrono::high_resolution_clock::now();
+            int ret = av_read_frame(this->deFormatc, input_packet);
+            auto readEnd = std::chrono::high_resolution_clock::now();
+            auto readDuration = std::chrono::duration_cast<std::chrono::microseconds>(readEnd - readStart).count();
+
             if (ret < 0) {
-                LOGI("Receiving ret < 0!");
-                stop = true; // 此时停止
-            }
-            else {
-                // skip audio stream, just process video stream
-                if (input_packet->stream_index != this->video_index) {
-                    continue;
+                LOGI("av_read_frame returned %d, stopping.", ret);
+                stop = true;
+            } else {
+                if (input_packet->stream_index == this->video_index) {
+                    ret = decoding(input_packet);
+                    if (ret < 0) {
+                        LOGI("Decoding Error");
+                    }
+                    packet_num++;
                 }
-                // 对packet进行解码
-                ret = decoding(input_packet);
-                if (ret < 0) {
-                    LOGI("Decoding Error");
-                }
-                packet_num++;
+                // Always unref the packet
+                auto loopEnd = std::chrono::high_resolution_clock::now();
+                auto loopDuration = std::chrono::duration_cast<std::chrono::microseconds>(loopEnd - loopStart).count();
+                
+                // Call JNI method to update timings
+                env->CallStaticVoidMethod(mainActivityClass, updateDecoderTimingsMethod, (jlong)loopDuration, (jlong)readDuration);
             }
-            av_packet_unref(input_packet);
+
+            auto loopEnd = std::chrono::high_resolution_clock::now();
+            auto loopDuration = std::chrono::duration_cast<std::chrono::microseconds>(loopEnd - loopStart).count();
+            // LOG_TIME("Decoder - Total: %.2f ms | Read: %.2f ms", loopDuration / 1000.0, readDuration / 1000.0);
         }
         // flush decoder
         int ret = decoding(nullptr);
@@ -216,7 +242,8 @@ public:
                 LOGI("Error! avFrameYUV420ToARGB8888");
             }
             frame_decoded_count++;
-            LOGI("frame decoded count %d, wdith = %d, height = %d", frame_decoded_count, input_frame->width, input_frame->height);
+            
+            if (frame_decoded_count % 30 == 0) LOGI("frame decoded count %d, wdith = %d, height = %d", frame_decoded_count, input_frame->width, input_frame->height);
 
             av_frame_unref(input_frame);
         }
@@ -280,11 +307,13 @@ public:
                   dst_data, dst_linesize);
 
         auto endTime = std::chrono::high_resolution_clock::now();
-        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime);
-        LOGI("sws_scale YUV->RGBA cost Time = %f ms", (double)(duration.count()));
+        auto durationUs = std::chrono::duration_cast<std::chrono::microseconds>(endTime - startTime).count();
+        
+        // Call JNI method to update YUV->RGB time
+        env->CallStaticVoidMethod(mainActivityClass, updateYuvToRgbTimeMethod, (jlong)durationUs);
 
         env->ReleaseByteArrayElements(outFrame, outData, 0); // Mode 0: copy back and free the buffer
-        env->CallStaticVoidMethod(this->cls, this->funcMethod, outFrame);
+        env->CallStaticVoidMethod(mainActivityClass, putDataMethod, outFrame);
         env->DeleteLocalRef(outFrame);
 
         return 0;

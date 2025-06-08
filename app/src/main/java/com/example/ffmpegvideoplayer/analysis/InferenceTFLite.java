@@ -29,6 +29,8 @@ import org.tensorflow.lite.support.tensorbuffer.TensorBuffer;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.Arrays;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.BlockingQueue;
 
 public class InferenceTFLite {
 
@@ -41,6 +43,9 @@ public class InferenceTFLite {
     private Interpreter tflite;
     private final Interpreter.Options options; // 所有代理都将配置到这个实例上
     private ImageProcessor imageProcessor;
+    private BlockingQueue<TensorBuffer> outputTensorBufferPool;
+    private int[] outputShape;
+    private DataType outputDataType;
 
     // 量化参数
     private final MetadataExtractor.QuantizationParams input5SINT8QuantParams = new MetadataExtractor.QuantizationParams(0.003921568859368563f, 0);
@@ -66,6 +71,8 @@ public class InferenceTFLite {
             // 使用配置好的 this.options 来创建 Interpreter
             ByteBuffer tfliteModel = FileUtil.loadMappedFile(context, MODEL_FILE);
             tflite = new Interpreter(tfliteModel, this.options);
+            this.outputShape = tflite.getOutputTensor(0).shape();
+            this.outputDataType = tflite.getOutputTensor(0).dataType();
 
             // 根据是否量化来配置图像处理器
             if (IS_INT8) {
@@ -93,23 +100,48 @@ public class InferenceTFLite {
         return OUTPUT_SIZE;
     }
 
-    public TensorBuffer superResolution(TensorImage modelInput, int[] tf_output_shape) {
-        // 你的原始代码将输出形状解释为 [N, W, H, C]，这里保持该行为
-        int[] bufferShape = new int[]{1, tf_output_shape[1], tf_output_shape[0], 3};
-
+    public TensorBuffer superResolution(TensorImage modelInput) {
         if (tflite == null) {
             Log.e(TAG, "TFLite interpreter is not initialized. Cannot run inference.");
-            // 返回一个空的或默认的 TensorBuffer
-            return TensorBuffer.createFixedSize(bufferShape, IS_INT8 ? DataType.UINT8 : DataType.FLOAT32);
+            return null;
+        }
+        if (outputTensorBufferPool == null) {
+            Log.e(TAG, "Output buffer pool is not initialized. Cannot run inference.");
+            return null;
         }
 
-        DataType outputDataType = tflite.getOutputTensor(0).dataType();
-        TensorBuffer outputTensorBuffer = TensorBuffer.createFixedSize(bufferShape, outputDataType);
+        TensorBuffer outputTensorBuffer = null;
+        try {
+            outputTensorBuffer = outputTensorBufferPool.take();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            Log.e(TAG, "Interrupted while waiting for a buffer from the pool.", e);
+            return null;
+        }
 
         // 运行推理
         tflite.run(modelInput.getBuffer(), outputTensorBuffer.getBuffer());
 
         return outputTensorBuffer;
+    }
+
+    public void initialBufferPool(int capacity) {
+        if (outputShape == null || outputDataType == null) {
+            Log.e(TAG, "Output shape/dataType not available. Cannot initialize buffer pool.");
+            return;
+        }
+        outputTensorBufferPool = new ArrayBlockingQueue<>(capacity);
+        for (int i = 0; i < capacity; i++) {
+            outputTensorBufferPool.offer(TensorBuffer.createFixedSize(outputShape, outputDataType));
+        }
+        Log.i(TAG, "Output TensorBuffer pool initialized with capacity: " + capacity + ", Shape: " + Arrays.toString(outputShape));
+    }
+
+    public void releaseBuffer(TensorBuffer buffer) {
+        if (outputTensorBufferPool != null && buffer != null) {
+            buffer.getBuffer().rewind();
+            outputTensorBufferPool.offer(buffer);
+        }
     }
 
     public void addNNApiDelegate() {
@@ -190,6 +222,11 @@ public class InferenceTFLite {
             tflite.close();
             tflite = null;
             Log.i(TAG, "TFLite interpreter closed.");
+        }
+        if (outputTensorBufferPool != null) {
+            outputTensorBufferPool.clear();
+            outputTensorBufferPool = null;
+            Log.i(TAG, "Output TensorBuffer pool cleared.");
         }
         // Interpreter.close() 会自动关闭所有已添加的代理，无需手动关闭
     }

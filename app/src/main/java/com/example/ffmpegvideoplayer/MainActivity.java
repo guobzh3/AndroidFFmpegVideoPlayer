@@ -28,9 +28,12 @@ import androidx.appcompat.app.AppCompatActivity;
 
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.util.List;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.ConcurrentLinkedDeque;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.Locale;
 import java.util.Deque;
 import java.util.LinkedList;
 // import androidx.core.util.Pools; // TaggedData Pools are removed
@@ -56,27 +59,39 @@ public class MainActivity extends AppCompatActivity {
     private static BlockingQueue<TensorImage> modelInputQueue = new ArrayBlockingQueue<>(QUEUE_CAPACITY);
     private static BlockingQueue<TensorBuffer> modelOutputQueue = new ArrayBlockingQueue<>(QUEUE_CAPACITY);
     private static BlockingQueue<InferenceResult> inferenceResultQueue = new ArrayBlockingQueue<>(QUEUE_CAPACITY);
-    private static BlockingQueue<ByteBuffer> safePatchBufferPool = new ArrayBlockingQueue<>(QUEUE_CAPACITY);
     private static BlockingQueue<InferenceResult> inferenceResultPool = new ArrayBlockingQueue<>(QUEUE_CAPACITY);
     private static final ArrayBlockingQueue<Bitmap> displayQueue = new ArrayBlockingQueue<>(1);
     private static BlockingQueue<TensorImage> tensorImagePool = new ArrayBlockingQueue<>(QUEUE_CAPACITY);
  
  
     // AtomicLongs for storing processing times of different stages
-    private final AtomicLong yuvToRgbTimeMs = new AtomicLong(0);
+    // --- Performance Counters ---
+    // C++ Timers (updated via JNI)
+    private static final AtomicLong decoderLoopTimeUs = new AtomicLong(0);
+    private static final AtomicLong decoderReadTimeUs = new AtomicLong(0);
+    private static final AtomicLong yuvToRgbTimeUs = new AtomicLong(0);
+
+    // Java Timers (instantaneous values)
+    private final AtomicLong prepareTfInputLoopTimeMs = new AtomicLong(0);
     private final AtomicLong prepareTfInputTakeTimeMs = new AtomicLong(0);
     private final AtomicLong prepareTfInputProcessingTimeMs = new AtomicLong(0);
+    private final AtomicLong inferenceLoopTimeMs = new AtomicLong(0);
     private final AtomicLong inferenceTakeTimeMs = new AtomicLong(0);
-    private final AtomicLong inferenceTimeMs = new AtomicLong(0);
+    private final AtomicLong patchDataLoopTimeMs = new AtomicLong(0);
+    private final AtomicLong patchDataTakeTimeMs = new AtomicLong(0);
+    private final AtomicLong patchDataProcessTimeMs = new AtomicLong(0);
+    private final AtomicLong upsampleLoopTimeMs = new AtomicLong(0);
     private final AtomicLong upsampleTakeTimeMs = new AtomicLong(0);
-    private final AtomicLong upsamplePassTimeMs = new AtomicLong(0);
-    private final AtomicLong compositePassTimeMs = new AtomicLong(0);
-    private final AtomicLong afterProcessSyncTimeMs = new AtomicLong(0);
-    private final AtomicLong afterProcessTensorProcessingTimeMs = new AtomicLong(0);
-    private final AtomicLong afterProcessCompositionTimeMs = new AtomicLong(0);
-    private final AtomicLong afterProcessDisplayPrepTimeMs = new AtomicLong(0);
-    private final AtomicLong afterProcessTotalLoopTimeMs = new AtomicLong(0);
-    private final AtomicLong gpuTotalTimeMs = new AtomicLong(0); // New timer for combined GPU work
+
+    // Deques for averaging display values (contain nanoseconds)
+    private final Deque<Long> recentInferenceTimes = new ConcurrentLinkedDeque<>();
+    private final Deque<Long> recentUpsamplePassTimes = new ConcurrentLinkedDeque<>();
+    private final Deque<Long> recentCompositePassTimes = new ConcurrentLinkedDeque<>();
+
+    // Atomics for holding 1-second averages (in microseconds)
+    private final AtomicLong avgInferenceTimeUs = new AtomicLong(0);
+    private final AtomicLong avgUpsamplePassTimeUs = new AtomicLong(0);
+    private final AtomicLong avgCompositePassTimeUs = new AtomicLong(0);
  
  
     // A simple data class to hold the results of the inference thread
@@ -120,6 +135,7 @@ public class MainActivity extends AppCompatActivity {
     private SurfaceView surfaceView;
     private ImageView imageView;
     private Handler handler;
+    private Handler logHandler;
     private volatile Bitmap mLastDisplayedBitmap = null;
 
     private TextView fpsTextView;
@@ -140,6 +156,17 @@ public class MainActivity extends AppCompatActivity {
     private Thread afterProcessThread;
     private OpenGLImageProcessor openGLImageProcessor;
     private volatile boolean openGLImageProcessorIsSetup = false;
+
+    private final Runnable logRunnable = new Runnable() {
+        @Override
+        public void run() {
+            logPerformanceAndQueueSizes();
+            if (processingRunning) {
+                logHandler.postDelayed(this, 1000); // Log every 1 second
+            }
+        }
+    };
+
     private final Runnable displayer = () -> {
         final Bitmap bitmapToDisplay = displayQueue.poll();
         if (bitmapToDisplay == null) return;
@@ -171,6 +198,7 @@ public class MainActivity extends AppCompatActivity {
                 Log.i(TAG_MAIN, "Using NNAPI Delegate for TFLite");
             }
             this.srTFLite.initialModel(this);
+            this.srTFLite.initialBufferPool(QUEUE_CAPACITY);
         } catch (Exception e) {
             Log.e(TAG_ERROR, "Model init error: " + e.getMessage(), e);
             Toast.makeText(this, "Model Initialization Failed: " + e.getMessage(), Toast.LENGTH_LONG).show();
@@ -185,6 +213,7 @@ public class MainActivity extends AppCompatActivity {
         surfaceView = findViewById(R.id.surfaceView);
         imageView = findViewById(R.id.imageView);
         handler = new Handler(Looper.getMainLooper());
+        logHandler = new Handler(Looper.getMainLooper());
 
         fpsTextView = findViewById(R.id.inference_time);
 
@@ -200,6 +229,7 @@ public class MainActivity extends AppCompatActivity {
         // Display buffers are no longer needed; we will display from the bitmap pool directly.
 
         mainProcess();
+        logHandler.post(logRunnable);
 
     }
 
@@ -209,11 +239,8 @@ public class MainActivity extends AppCompatActivity {
         openGLImageProcessor = new OpenGLImageProcessor(getApplicationContext());
 
         // Initialize pools to avoid allocation in the loops.
-        int patchBufferSize = TF_OUTPUT_W * TF_OUTPUT_H * 3 * 4; // W*H*RGB*sizeof(float)
         TensorBuffer primeBuffer = TensorBuffer.createFixedSize(new int[]{TF_INPUT_H, TF_INPUT_W, 3}, DataType.FLOAT32);
         for (int i = 0; i < QUEUE_CAPACITY; i++) {
-            // Pool for patch data buffers
-            safePatchBufferPool.offer(ByteBuffer.allocateDirect(patchBufferSize).order(ByteOrder.nativeOrder()));
             // Pool for the data structure that holds the patch data and metadata
             InferenceResult res = new InferenceResult();
             res.patchRect = new float[4];
@@ -260,15 +287,16 @@ public class MainActivity extends AppCompatActivity {
         while (processingRunning) {
             SharedByteBuffer sharedBuffer = null;
             try {
-                long loopStart = System.currentTimeMillis();
+                long loopStart = System.nanoTime();
 
-                long takeStart = System.currentTimeMillis();
+                long takeStart = System.nanoTime();
                 sharedBuffer = rgbFrameQueueForTfInput.take();
-                ByteBuffer rgbBuffer = sharedBuffer.buffer;
-                long takeEnd = System.currentTimeMillis();
-                Log.d(TAG_TF_INPUT, "Processing RGB buffer for TF input");
+                long takeEnd = System.nanoTime();
+                prepareTfInputTakeTimeMs.set((takeEnd - takeStart) / 1_000_000);
 
-                long processingStart = System.currentTimeMillis();
+                ByteBuffer rgbBuffer = sharedBuffer.buffer;
+
+                long processingStart = System.nanoTime();
                 int cropX = tile_index[0] * TF_INPUT_W;
                 int cropY = tile_index[1] * TF_INPUT_H;
 
@@ -277,28 +305,21 @@ public class MainActivity extends AppCompatActivity {
                     continue;
                 }
 
-                // Get a pre-allocated TensorImage from the pool.
                 TensorImage modelInputTensor = tensorImagePool.take();
                 ByteBuffer modelInputByteBuffer = modelInputTensor.getBuffer();
 
-                // Reset buffers for the native call
                 rgbBuffer.position(0);
                 modelInputByteBuffer.rewind();
 
-                // Call the native function for high-performance processing, writing directly into the TensorImage's buffer.
                 cropAndNormalizeRgbaToRgbFloat(rgbBuffer, modelInputByteBuffer, cropX, cropY, TF_INPUT_W, TF_INPUT_H, VIDEO_INPUT_W);
 
-                // The TensorImage is now ready, queue it for the inference thread.
                 modelInputQueue.put(modelInputTensor);
 
-                long processingEnd = System.currentTimeMillis();
-                long takeDuration = takeEnd - takeStart;
-                long processingDuration = processingEnd - processingStart;
-                prepareTfInputTakeTimeMs.set(takeDuration);
-                prepareTfInputProcessingTimeMs.set(processingDuration);
-                // 记录详细时间信息
-                long loopEnd = System.currentTimeMillis();
-                Log.i(TAG_TIME, "TFLite Input - Total: " + (loopEnd - loopStart) + "ms | Take: " + takeDuration + "ms | Proc: " + processingDuration + "ms");
+                long processingEnd = System.nanoTime();
+                prepareTfInputProcessingTimeMs.set((processingEnd - processingStart) / 1_000_000);
+
+                long loopEnd = System.nanoTime();
+                prepareTfInputLoopTimeMs.set((loopEnd - loopStart) / 1_000_000);
 
             } catch (InterruptedException e) {
                 Log.w(TAG_TF_INPUT, "Loop interrupted.");
@@ -338,45 +359,49 @@ public class MainActivity extends AppCompatActivity {
             Bitmap finalCompositedBitmap = null;
  
             try {
+                long loopStart = System.nanoTime();
+
                 // 1. Synchronize and take from both queues. This is the new pipeline join point.
+                long takeStart = System.nanoTime();
                 sharedBuffer = rgbFrameQueueForUpsample.take();
                 inferenceResult = inferenceResultQueue.take();
- 
+                long takeEnd = System.nanoTime();
+                upsampleTakeTimeMs.set((takeEnd - takeStart) / 1_000_000);
+
                 if (openGLImageProcessor != null && openGLImageProcessorIsSetup) {
-                    long gpuWorkStart = System.currentTimeMillis();
- 
-                    // 2. Perform Pass 1: Upscale
+                    long gpuWorkStart = System.nanoTime();
+
+                    // 2. Perform Pass 1: Upscale (bi)
                     ByteBuffer rgbBuffer = sharedBuffer.buffer;
                     rgbBuffer.position(0);
-                    long pass1Start = System.currentTimeMillis();
+                    long pass1Start = System.nanoTime();
                     openGLImageProcessor.performUpscalePass(rgbBuffer, VIDEO_INPUT_W, VIDEO_INPUT_H);
-                    long pass1End = System.currentTimeMillis();
-                    upsamplePassTimeMs.set(pass1End - pass1Start);
- 
+                    long pass1End = System.nanoTime();
+                    recentUpsamplePassTimes.add(pass1End - pass1Start);
+
                     // 3. Perform Pass 2: Composite
-                    long pass2Start = System.currentTimeMillis();
+                    long pass2Start = System.nanoTime();
                     finalCompositedBitmap = openGLImageProcessor.performCompositePass(
                             inferenceResult.patchBuffer,
                             inferenceResult.patchWidth,
                             inferenceResult.patchHeight,
                             inferenceResult.patchRect);
-                    long pass2End = System.currentTimeMillis();
+                    long pass2End = System.nanoTime();
+                    recentCompositePassTimes.add(pass2End - pass2Start);
 
-                    // CRITICAL: Return the buffer and the result container to their respective pools.
-                    if (inferenceResult.patchBuffer != null) {
-                        safePatchBufferPool.offer(inferenceResult.patchBuffer);
-                    }
+                    // CRITICAL: Return the result container to its pool.
                     inferenceResultPool.offer(inferenceResult);
-                    compositePassTimeMs.set(pass2End - pass2Start);
- 
-                    long gpuWorkEnd = System.currentTimeMillis();
-                    gpuTotalTimeMs.set(gpuWorkEnd - gpuWorkStart);
- 
+
+                    long gpuWorkEnd = System.nanoTime();
+                    // This is not a primary metric, so we don't average it.
+                    // gpuTotalTimeMs.set((gpuWorkEnd - gpuWorkStart) / 1_000_000);
+
                     // 5. Post the final bitmap to the UI thread for display
                     if (finalCompositedBitmap != null) {
                         displayQueue.clear();
                         displayQueue.offer(finalCompositedBitmap);
                         handler.post(displayer);
+                        updateTextView(); // Update TextView with new performance data
                     }
                 }
             } catch (InterruptedException e) {
@@ -402,31 +427,26 @@ public class MainActivity extends AppCompatActivity {
         Log.i(TAG_INFERENCE, "Initialized and waiting for data.");
         while (processingRunning) {
             try {
-                long loopStart = System.currentTimeMillis();
+                long loopStart = System.nanoTime();
 
-                long takeStart = System.currentTimeMillis();
+                long takeStart = System.nanoTime();
                 TensorImage modelInput = modelInputQueue.take();
-                long takeEnd = System.currentTimeMillis();
-                Log.d(TAG_INFERENCE, "Processing model input"); // Use Log.d
+                long takeEnd = System.nanoTime();
+                inferenceTakeTimeMs.set((takeEnd - takeStart) / 1_000_000);
 
-                long inferenceStart = System.currentTimeMillis();
-                // 将 TF_OUTPUT_W 和 TF_OUTPUT_H 传递给 superResolution
-                // InferenceTFLite 需要 [宽度, 高度] 作为其 tf_output_shape 参数
-                TensorBuffer modelOutput = srTFLite.superResolution(modelInput, TF_OUTPUT_SHAPE);
-                long inferenceEnd = System.currentTimeMillis();
+                long inferenceStart = System.nanoTime();
+                TensorBuffer modelOutput = srTFLite.superResolution(modelInput);
+                long inferenceEnd = System.nanoTime();
+                recentInferenceTimes.add(inferenceEnd - inferenceStart);
 
-                // 记录详细时间信息
-                long loopEnd = System.currentTimeMillis();
-                long takeDuration = takeEnd - takeStart;
-                long inferenceDuration = inferenceEnd - inferenceStart;
-                inferenceTakeTimeMs.set(takeDuration);
-                inferenceTimeMs.set(inferenceDuration);
-                Log.i(TAG_TIME, "Inference - Total: " + (loopEnd - loopStart) + "ms | Take: " + takeDuration + "ms | Infer: " + inferenceDuration + "ms");
+                if (modelOutput != null) {
+                    modelOutputQueue.put(modelOutput);
+                }
 
-                modelOutputQueue.put(modelOutput); // 如果队列已满则阻塞
-
-                // Return the TensorImage to the pool after inference is done.
                 tensorImagePool.offer(modelInput);
+
+                long loopEnd = System.nanoTime();
+                inferenceLoopTimeMs.set((loopEnd - loopStart) / 1_000_000);
 
             } catch (InterruptedException e) {
                 Log.w(TAG_INFERENCE, "Loop interrupted.");
@@ -446,38 +466,30 @@ public class MainActivity extends AppCompatActivity {
         Log.i(TAG_AFTER_PROC, "Initialized and waiting for data.");
  
         while (processingRunning) {
+            TensorBuffer hwcOutputTensorBuffer = null;
             try {
+                long loopStart = System.nanoTime();
+
                 // 1. Get the output from the TFLite model.
-                TensorBuffer hwcOutputTensorBuffer = modelOutputQueue.take();
+                long takeStart = System.nanoTime();
+                hwcOutputTensorBuffer = modelOutputQueue.take();
+                long takeEnd = System.nanoTime();
+                patchDataTakeTimeMs.set((takeEnd - takeStart) / 1_000_000);
 
-                // 2. Get a safe buffer from the pool to copy the inference result into.
-                // This avoids both race conditions and per-frame allocations.
-                ByteBuffer safeBuffer = safePatchBufferPool.take();
-                safeBuffer.clear();
+                long processStart = System.nanoTime();
 
+                // 2. Get the original buffer directly. No copy needed.
                 ByteBuffer originalBuffer = hwcOutputTensorBuffer.getBuffer();
                 originalBuffer.rewind();
 
-                // Defensively check capacity, though it should always be sufficient.
-                if (safeBuffer.capacity() < originalBuffer.remaining()) {
-                    Log.e(TAG_AFTER_PROC, "Pooled buffer is too small! Releasing and skipping frame.");
-                    safePatchBufferPool.offer(safeBuffer); // Release it back
-                    continue;
-                }
-
-                safeBuffer.put(originalBuffer);
-                safeBuffer.flip();
-
                 // 3. Get a result container from the pool and populate it.
                 InferenceResult result = inferenceResultPool.take();
-                result.patchBuffer = safeBuffer;
+                result.patchBuffer = originalBuffer;
                 result.patchWidth = hwcOutputTensorBuffer.getShape()[2];
                 result.patchHeight = hwcOutputTensorBuffer.getShape()[1];
 
-
                 float rectW = (float)TF_OUTPUT_W / video_output_shape.getWidth();
                 float rectH = (float)TF_OUTPUT_H / video_output_shape.getHeight();
-                // User confirmed that * 2 is correct for their setup.
                 float topLeftX = (float)(tile_index[0] * TF_INPUT_W) / video_output_shape.getWidth() * 2;
                 float topLeftY = (float)(tile_index[1] * TF_INPUT_H) / video_output_shape.getHeight() * 2;
 
@@ -485,10 +497,16 @@ public class MainActivity extends AppCompatActivity {
                 result.patchRect[1] = topLeftY;
                 result.patchRect[2] = rectW;
                 result.patchRect[3] = rectH;
- 
-                // 3. Queue the result for the rendering thread
+
+                // 4. Queue the result for the rendering thread
                 inferenceResultQueue.put(result);
- 
+
+                long processEnd = System.nanoTime();
+                patchDataProcessTimeMs.set((processEnd - processStart) / 1_000_000);
+
+                long loopEnd = System.nanoTime();
+                patchDataLoopTimeMs.set((loopEnd - loopStart) / 1_000_000);
+
             } catch (InterruptedException e) {
                 Log.w(TAG_AFTER_PROC, "Loop interrupted.");
                 Thread.currentThread().interrupt();
@@ -496,6 +514,10 @@ public class MainActivity extends AppCompatActivity {
             } catch (Throwable t) {
                 Log.e(TAG_AFTER_PROC, "FATAL Error in patch data loop: " + t.getMessage(), t);
                 processingRunning = false;
+            } finally {
+                if (hwcOutputTensorBuffer != null) {
+                    srTFLite.releaseBuffer(hwcOutputTensorBuffer);
+                }
             }
         }
         Log.i(TAG_AFTER_PROC, "Loop Finished (Patch Data Prep)");
@@ -505,24 +527,91 @@ public class MainActivity extends AppCompatActivity {
     public void updateTextView() {
         runOnUiThread(() -> {
             if (fpsTextView != null) {
-                String displayText = String.format(java.util.Locale.US,
-                        "yuv2rgb % 3d; " +
-                        "TFInput: % 3d | % 3d ; " +
-                        "GPU Pass 1 (Upsample): % 3d; " +
-                        "GPU Pass 2 (Composite): % 3d; " +
-                        "GPU Total: % 3d; " +
-                        "Inference: % 3d | % 3d ms; ",
-                        yuvToRgbTimeMs.get(),
-                        prepareTfInputTakeTimeMs.get(), prepareTfInputProcessingTimeMs.get(),
-                        upsamplePassTimeMs.get(),
-                        compositePassTimeMs.get(),
-                        gpuTotalTimeMs.get(),
-                        inferenceTakeTimeMs.get(), inferenceTimeMs.get());
+                // Values are in microseconds, convert to ms for display
+                double avgSrMs = avgInferenceTimeUs.get() / 1000.0;
+                double avgBiMs = avgUpsamplePassTimeUs.get() / 1000.0;
+                double avgCompMs = avgCompositePassTimeUs.get() / 1000.0;
+
+                String displayText = String.format(Locale.US,
+                        "SR: %.2f | BI: %.2f | Comp: %.2f",
+                        avgSrMs, avgBiMs, avgCompMs
+                );
                 fpsTextView.setText(displayText);
             }
         });
     }
+
+    private long calculateAndClearAverage(Deque<Long> dataQueue) {
+        if (dataQueue.isEmpty()) {
+            return 0;
+        }
+        long sum = 0;
+        int count = 0;
+        // Drain the queue to avoid concurrent modification issues and get a stable size
+        List<Long> items = new LinkedList<>();
+        while (!dataQueue.isEmpty()) {
+            items.add(dataQueue.poll());
+        }
+
+        for (Long nanoTime : items) {
+            sum += nanoTime;
+            count++;
+        }
+        // Return average in microseconds
+        return (sum / count) / 1000;
+    }
+
+    private void logPerformanceAndQueueSizes() {
+        // Calculate averages for the last second
+        avgInferenceTimeUs.set(calculateAndClearAverage(recentInferenceTimes));
+        avgUpsamplePassTimeUs.set(calculateAndClearAverage(recentUpsamplePassTimes));
+        avgCompositePassTimeUs.set(calculateAndClearAverage(recentCompositePassTimes));
+
+        String logMsg = String.format(Locale.US,
+                """
+                        TICK --- Loops(ms): [Dec: %.2f, TFIn: %d, Infer: %d, Patch: %d, GL: %d] ---\s
+                        Takes(ms): [Read: %.2f, TFIn: %d, Infer: %d, Patch: %d, GL: %d] ---\s
+                        Process(ms): [YUV: %.2f, TFIn: %d, SR: %.2f, Patch: %d, BI: %.2f, Comp: %.2f] ---\s
+                        Queues: [tfIn: %d, upsample: %d, modelIn: %d, modelOut: %d, result: %d]""",
+                // Loop Times
+                decoderLoopTimeUs.get() / 1000.0,
+                prepareTfInputLoopTimeMs.get(),
+                inferenceLoopTimeMs.get(),
+                patchDataLoopTimeMs.get(),
+                upsampleLoopTimeMs.get(),
+                // Take Times
+                decoderReadTimeUs.get() / 1000.0,
+                prepareTfInputTakeTimeMs.get(),
+                inferenceTakeTimeMs.get(),
+                patchDataTakeTimeMs.get(),
+                upsampleTakeTimeMs.get(),
+                // Processing Times
+                yuvToRgbTimeUs.get() / 1000.0,
+                prepareTfInputProcessingTimeMs.get(),
+                avgInferenceTimeUs.get() / 1000.0,
+                patchDataProcessTimeMs.get(),
+                avgUpsamplePassTimeUs.get() / 1000.0,
+                avgCompositePassTimeUs.get() / 1000.0,
+                // Queue Sizes
+                rgbFrameQueueForTfInput.size(),
+                rgbFrameQueueForUpsample.size(),
+                modelInputQueue.size(),
+                modelOutputQueue.size(),
+                inferenceResultQueue.size()
+        );
+        Log.i(TAG_TIME, logMsg);
+    }
  
+    // --- JNI Callbacks ---
+    public static void updateDecoderTimings(long loopTimeUs, long readTimeUs) {
+        decoderLoopTimeUs.set(loopTimeUs);
+        decoderReadTimeUs.set(readTimeUs);
+    }
+
+    public static void updateYuvToRgbTime(long durationUs) {
+        yuvToRgbTimeUs.set(durationUs);
+    }
+
     // 从 JNI 调用, now receives RGBA data
     public static void putData(byte[] rgbaData) {
         SharedByteBuffer sharedBuffer = null;
@@ -562,6 +651,8 @@ public class MainActivity extends AppCompatActivity {
         Log.i(TAG_MAIN, "onDestroy: Shutting down threads/resources.");
         processingRunning = false; // Signal loops to stop
  
+        logHandler.removeCallbacks(logRunnable);
+
         // 中断线程以使其脱离阻塞队列操作
         if (prepareTfInputThread != null) {
             prepareTfInputThread.interrupt();
@@ -596,7 +687,6 @@ public class MainActivity extends AppCompatActivity {
         modelInputQueue.clear();
         modelOutputQueue.clear();
         inferenceResultQueue.clear();
-        safePatchBufferPool.clear();
         inferenceResultPool.clear();
         tensorImagePool.clear();
  

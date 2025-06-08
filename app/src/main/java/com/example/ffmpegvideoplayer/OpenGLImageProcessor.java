@@ -63,6 +63,8 @@ public class OpenGLImageProcessor {
     // Texture IDs
     private int inputVideoTextureId = 0; // For the raw video frame
     private int srPatchTextureId = 0;    // For the SR patch from TFLite
+    private int lastPatchWidth = 0;
+    private int lastPatchHeight = 0;
 
     // --- Zero-Copy Pipeline Fields ---
     private static final int PIPELINE_DEPTH = 3; // Triple buffering for the pipeline
@@ -125,6 +127,10 @@ public class OpenGLImageProcessor {
         uPatchRectHandle = GLES20.glGetUniformLocation(programHandle, "u_PatchRect");
         uDrawPatchHandle = GLES20.glGetUniformLocation(programHandle, "u_DrawPatch");
         texelSizeHandle = GLES20.glGetUniformLocation(programHandle, "u_TexelSize"); // Re-confirming handle, though name is same
+
+        // Set texture unit uniforms once, since they don't change.
+        GLES20.glUniform1i(uBaseTextureHandle, 0); // Corresponds to GL_TEXTURE0
+        GLES20.glUniform1i(uSrPatchTextureHandle, 1); // Corresponds to GL_TEXTURE1
 
         // The new path requires GLES3 and API 26+
         useZeroCopyPath = (GLES30.glGetString(GLES30.GL_VERSION) != null) && (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O);
@@ -245,17 +251,14 @@ public class OpenGLImageProcessor {
      */
     public Bitmap performCompositePass(ByteBuffer srPatchBuffer, int patchWidth, int patchHeight, float[] patchRect) {
         if (!useZeroCopyPath) return null;
- 
+
+
         // --- Pipeline Management: Wait for the slot we want to use to be free ---
         FrameData slot = pipelineSlots[pipelineIndex];
         if (slot.fence != null) {
             EGLExt.eglClientWaitSyncKHR(eglDisplay, slot.fence, EGLExt.EGL_SYNC_FLUSH_COMMANDS_BIT_KHR, EGLExt.EGL_FOREVER_KHR);
             EGLExt.eglDestroySyncKHR(eglDisplay, slot.fence);
             slot.fence = null;
-            // The bitmap in this slot is now free because the fence is signaled.
-            // We DO NOT release it here. MainActivity is the consumer and is responsible
-            // for releasing the bitmap back to the pool when it's no longer being displayed.
-            // Releasing it here would cause a double-release, leading to pool corruption.
         }
  
         try {
@@ -285,7 +288,19 @@ public class OpenGLImageProcessor {
         // Upload SR patch data to its texture
         GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, srPatchTextureId);
         // The model output is RGB Float.
-        GLES30.glTexImage2D(GLES30.GL_TEXTURE_2D, 0, GLES30.GL_RGB32F, patchWidth, patchHeight, 0, GLES30.GL_RGB, GLES30.GL_FLOAT, srPatchBuffer);
+        // Optimize texture upload: use glTexSubImage2D if patch size hasn't changed.
+        long t0 = System.nanoTime();
+        if (patchWidth != lastPatchWidth || patchHeight != lastPatchHeight) {
+            // If size changes, we must re-specify the texture storage.
+            GLES30.glTexImage2D(GLES30.GL_TEXTURE_2D, 0, GLES30.GL_RGB32F, patchWidth, patchHeight, 0, GLES30.GL_RGB, GLES30.GL_FLOAT, srPatchBuffer);
+            lastPatchWidth = patchWidth;
+            lastPatchHeight = patchHeight;
+        } else if (srPatchBuffer != null) {
+            // If size is the same and we have a buffer, just update the texture content.
+            GLES30.glTexSubImage2D(GLES30.GL_TEXTURE_2D, 0, 0, 0, patchWidth, patchHeight, GLES30.GL_RGB, GLES30.GL_FLOAT, srPatchBuffer);
+        }
+        long t1 = System.nanoTime();
+        // Log.d(TAG, "SR Patch texture upload took: " + (t1 - t0) / 1_000_000 + " ms");
 
         // Set uniforms for the composite shader
         GLES20.glUniform1i(uRenderModeHandle, 1); // Mode 1: Composite
@@ -297,11 +312,11 @@ public class OpenGLImageProcessor {
         // Bind textures
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, upscaledTexture[0]); // Background
-        GLES20.glUniform1i(uBaseTextureHandle, 0);
+        // The uniform for the texture unit is now set once in setup().
 
         GLES20.glActiveTexture(GLES20.GL_TEXTURE1);
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, srPatchTextureId); // SR Patch
-        GLES20.glUniform1i(uSrPatchTextureHandle, 1);
+        // The uniform for the texture unit is now set once in setup().
 
         // Draw the quad
         drawQuad();

@@ -47,7 +47,7 @@ public class InferenceTFLite {
 
     // EGL 上下文，按原样保留
     private MinimalEGLContext eglCtx = new MinimalEGLContext();
-    private boolean eglSetupSuccessful = eglCtx.setup();
+//    private boolean eglSetupSuccessful = eglCtx.setup();
 
     public InferenceTFLite() {
         // 在构造函数中初始化 Options 对象，确保它在所有代理方法中都可用
@@ -56,11 +56,11 @@ public class InferenceTFLite {
     }
 
     public void initialModel(Context context) {
-        if (eglSetupSuccessful) {
-            Log.i(TAG, "EGL Context setup successful.");
-        } else {
-            Log.w(TAG, "EGL Context setup failed.");
-        }
+//        if (eglSetupSuccessful) {
+//            Log.i(TAG, "EGL Context setup successful.");
+//        } else {
+//            Log.w(TAG, "EGL Context setup failed.");
+//        }
 
         try {
             // 使用配置好的 this.options 来创建 Interpreter

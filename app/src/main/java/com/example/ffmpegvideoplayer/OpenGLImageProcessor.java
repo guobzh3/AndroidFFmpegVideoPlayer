@@ -43,12 +43,26 @@ public class OpenGLImageProcessor {
     private int programHandle;
     private int positionHandle;
     private int texCoordHandle;
-    private int inputTextureHandle;
     private int texelSizeHandle;
 
-    private int[] fboHandle = new int[1];
-    private int[] renderTextureHandle = new int[1]; // A texture used as a target for glEGLImageTargetTexture2DOES
-    private int currentInputTextureId = 0;
+    // Uniform handles
+    private int uBaseTextureHandle;
+    private int uSrPatchTextureHandle;
+    private int uPatchRectHandle;
+    private int uDrawPatchHandle;
+    private int uRenderModeHandle;
+
+    // FBO for the first pass (upscaling)
+    private int[] upscaleFbo = new int[1];
+    private int[] upscaledTexture = new int[1];
+
+    // FBO for the second pass (compositing), which targets the final output
+    private int[] compositeFbo = new int[1];
+    private int[] compositeTexture = new int[1]; // This handle is a placeholder, targeted by EGLImage
+
+    // Texture IDs
+    private int inputVideoTextureId = 0; // For the raw video frame
+    private int srPatchTextureId = 0;    // For the SR patch from TFLite
 
     // --- Zero-Copy Pipeline Fields ---
     private static final int PIPELINE_DEPTH = 3; // Triple buffering for the pipeline
@@ -58,8 +72,7 @@ public class OpenGLImageProcessor {
     private EGLImageKHR[] eglImages;
     private FrameData[] pipelineSlots;
     private int pipelineIndex = 0; // The next available slot to queue a frame into
-    private BlockingQueue<FrameData> processedFrames; // Queue for frames that are ready for consumption
-
+ 
     // --- Bitmap Pooling Fields ---
     private static final int BITMAP_POOL_SIZE = PIPELINE_DEPTH + 2; // Pool should be slightly larger than pipeline depth
     private BlockingQueue<Bitmap> availableBitmaps;
@@ -104,8 +117,14 @@ public class OpenGLImageProcessor {
         GLES20.glUseProgram(programHandle);
         positionHandle = GLES20.glGetAttribLocation(programHandle, "a_position");
         texCoordHandle = GLES20.glGetAttribLocation(programHandle, "a_coord");
-        inputTextureHandle = GLES20.glGetUniformLocation(programHandle, "u_Texture");
-        texelSizeHandle = GLES20.glGetUniformLocation(programHandle, "u_TexelSize");
+
+        // Get handles for all uniforms
+        uRenderModeHandle = GLES20.glGetUniformLocation(programHandle, "u_RenderMode");
+        uBaseTextureHandle = GLES20.glGetUniformLocation(programHandle, "u_BaseTexture");
+        uSrPatchTextureHandle = GLES20.glGetUniformLocation(programHandle, "u_SrPatchTexture");
+        uPatchRectHandle = GLES20.glGetUniformLocation(programHandle, "u_PatchRect");
+        uDrawPatchHandle = GLES20.glGetUniformLocation(programHandle, "u_DrawPatch");
+        texelSizeHandle = GLES20.glGetUniformLocation(programHandle, "u_TexelSize"); // Re-confirming handle, though name is same
 
         // The new path requires GLES3 and API 26+
         useZeroCopyPath = (GLES30.glGetString(GLES30.GL_VERSION) != null) && (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O);
@@ -125,19 +144,22 @@ public class OpenGLImageProcessor {
             return false; // For this highly optimized case, we fail if zero-copy isn't possible.
         }
 
-        // Setup reusable input texture
-        int[] tempTex = new int[1];
-        GLES20.glGenTextures(1, tempTex, 0);
-        currentInputTextureId = tempTex[0];
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, currentInputTextureId);
-        GLES20.glTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA, inputWidth, inputHeight, 0, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, null);
-        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR);
-        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR);
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
+        // --- Create all necessary textures ---
+        inputVideoTextureId = createTexture(inputWidth, inputHeight, false);
+        srPatchTextureId = createTexture(0, 0, true); // SR patch dimensions are dynamic, will be defined later
+        upscaledTexture[0] = createTexture(outputWidth, outputHeight, false);
 
-        // Setup FBO. It will be re-targeted to different EGLImage textures.
-        GLES20.glGenFramebuffers(1, fboHandle, 0);
-        GLES20.glGenTextures(1, renderTextureHandle, 0); // This texture is just a handle, it will be defined by the EGLImage
+        // --- Setup FBO for Pass 1 (Upscaling) ---
+        GLES20.glGenFramebuffers(1, upscaleFbo, 0);
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, upscaleFbo[0]);
+        GLES20.glFramebufferTexture2D(GLES20.GL_FRAMEBUFFER, GLES20.GL_COLOR_ATTACHMENT0, GLES20.GL_TEXTURE_2D, upscaledTexture[0], 0);
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
+
+        // --- Setup FBO for Pass 2 (Compositing) ---
+        // This FBO will be re-targeted to different EGLImage textures from the pipeline.
+        GLES20.glGenFramebuffers(1, compositeFbo, 0);
+        // The texture for this FBO is just a handle, it will be defined by the EGLImage later.
+        GLES20.glGenTextures(1, compositeTexture, 0);
 
         return true;
     }
@@ -148,8 +170,7 @@ public class OpenGLImageProcessor {
         allCreatedBitmapsInPool = new ArrayList<>(BITMAP_POOL_SIZE);
         eglImages = new EGLImageKHR[BITMAP_POOL_SIZE];
         pipelineSlots = new FrameData[PIPELINE_DEPTH];
-        processedFrames = new ArrayBlockingQueue<>(PIPELINE_DEPTH);
-
+ 
         Log.i(TAG, "Setting up HARDWARE Bitmap pool with size: " + BITMAP_POOL_SIZE);
         for (int i = 0; i < BITMAP_POOL_SIZE; i++) {
             try {
@@ -191,81 +212,113 @@ public class OpenGLImageProcessor {
         return true;
     }
 
-    public void queueFrame(ByteBuffer inputBuffer, int inputWidth, int inputHeight) {
-        if (!useZeroCopyPath) return;
+    /**
+     * Pass 1: Upscales the low-resolution video frame and renders it to an internal texture.
+     */
+    public void performUpscalePass(ByteBuffer inputBuffer, int inputWidth, int inputHeight) {
+        GLES20.glUseProgram(programHandle);
 
-        // 1. Wait for the slot we are about to use to be free.
-        FrameData slot = pipelineSlots[pipelineIndex];
-        if (slot.fence != null) {
-            int waitResult = EGLExt.eglClientWaitSyncKHR(eglDisplay, slot.fence, EGLExt.EGL_SYNC_FLUSH_COMMANDS_BIT_KHR, EGLExt.EGL_FOREVER_KHR);
-            if (waitResult == EGLExt.EGL_FALSE) {
-                Log.e(TAG, "Failed to wait for fence on slot " + pipelineIndex);
-                return;
-            }
-            EGLExt.eglDestroySyncKHR(eglDisplay, slot.fence);
-            slot.fence = null;
-            // The bitmap used in this slot is now fully processed and can be consumed.
-            processedFrames.offer(slot);
-        }
+        // Bind the FBO for the upscale pass
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, upscaleFbo[0]);
+        GLES20.glViewport(0, 0, outputWidth, outputHeight);
 
-        // 2. Prepare for rendering this frame
-        try {
-            slot.bitmap = availableBitmaps.take(); // Get a fresh bitmap to render into
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            return;
-        }
-
-        // Find the EGLImage corresponding to the bitmap
-        EGLImageKHR eglImage = null;
-        for(int i=0; i<allCreatedBitmapsInPool.size(); i++){
-            if(allCreatedBitmapsInPool.get(i) == slot.bitmap){
-                eglImage = eglImages[i];
-                break;
-            }
-        }
-        if(eglImage == null){
-            Log.e(TAG, "Could not find EGLImage for the bitmap. This should not happen.");
-            return;
-        }
-
-        // 3. Upload input texture
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, currentInputTextureId);
+        // Upload the new video frame data to its texture
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, inputVideoTextureId);
         GLES20.glTexSubImage2D(GLES20.GL_TEXTURE_2D, 0, 0, 0, inputWidth, inputHeight, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, inputBuffer);
 
-        // 4. Bind FBO to the EGLImage-backed texture
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, renderTextureHandle[0]);
-        EGLExt.glEGLImageTargetTexture2DOES(GLES20.GL_TEXTURE_2D, eglImage);
-        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fboHandle[0]);
-        GLES20.glFramebufferTexture2D(GLES20.GL_FRAMEBUFFER, GLES20.GL_COLOR_ATTACHMENT0, GLES20.GL_TEXTURE_2D, renderTextureHandle[0], 0);
-
-        // 5. Draw
-        GLES20.glViewport(0, 0, outputWidth, outputHeight);
-        GLES20.glUseProgram(programHandle);
-        GLES20.glEnableVertexAttribArray(positionHandle);
-        GLES20.glVertexAttribPointer(positionHandle, 2, GLES20.GL_FLOAT, false, 0, vertexBuffer);
-        GLES20.glEnableVertexAttribArray(texCoordHandle);
-        GLES20.glVertexAttribPointer(texCoordHandle, 2, GLES20.GL_FLOAT, false, 0, texCoordBuffer);
+        // Set uniforms for the upscale shader
+        GLES20.glUniform1i(uRenderModeHandle, 0); // Mode 0: Upscale
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, currentInputTextureId);
-        GLES20.glUniform1i(inputTextureHandle, 0);
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, inputVideoTextureId);
+        GLES20.glUniform1i(uBaseTextureHandle, 0);
         GLES20.glUniform2f(texelSizeHandle, 1.0f / inputWidth, 1.0f / inputHeight);
-        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4);
 
-        // 6. Insert fence
-        slot.fence = EGLExt.eglCreateSyncKHR(eglDisplay, EGLExt.EGL_SYNC_FENCE_KHR, null);
-        GLES20.glFlush();
+        // Draw the quad
+        drawQuad();
 
-        // 7. Advance pipeline index
-        pipelineIndex = (pipelineIndex + 1) % PIPELINE_DEPTH;
+        // Unbind FBO
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
     }
 
-    public Bitmap getProcessedFrame() {
-        FrameData frameData = processedFrames.poll();
-        if (frameData != null) {
-            return frameData.bitmap;
+    /**
+     * Pass 2: Composites the upscaled background with the SR patch onto a final hardware bitmap.
+     */
+    public Bitmap performCompositePass(ByteBuffer srPatchBuffer, int patchWidth, int patchHeight, float[] patchRect) {
+        if (!useZeroCopyPath) return null;
+ 
+        // --- Pipeline Management: Wait for the slot we want to use to be free ---
+        FrameData slot = pipelineSlots[pipelineIndex];
+        if (slot.fence != null) {
+            EGLExt.eglClientWaitSyncKHR(eglDisplay, slot.fence, EGLExt.EGL_SYNC_FLUSH_COMMANDS_BIT_KHR, EGLExt.EGL_FOREVER_KHR);
+            EGLExt.eglDestroySyncKHR(eglDisplay, slot.fence);
+            slot.fence = null;
+            // The bitmap in this slot is now free because the fence is signaled.
+            // We DO NOT release it here. MainActivity is the consumer and is responsible
+            // for releasing the bitmap back to the pool when it's no longer being displayed.
+            // Releasing it here would cause a double-release, leading to pool corruption.
         }
-        return null; // Non-blocking
+ 
+        try {
+            slot.bitmap = availableBitmaps.take();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return null;
+        }
+ 
+        EGLImageKHR eglImage = findEglImageForBitmap(slot.bitmap);
+        if (eglImage == null) {
+            // If something goes wrong, return the bitmap to the pool to avoid leaks
+            releaseBitmapToPool(slot.bitmap);
+            return null;
+        }
+
+        // --- Render Logic ---
+        GLES20.glUseProgram(programHandle);
+
+        // Bind the FBO for the composite pass, targeting the hardware bitmap's EGLImage
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, compositeFbo[0]);
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, compositeTexture[0]);
+        EGLExt.glEGLImageTargetTexture2DOES(GLES20.GL_TEXTURE_2D, eglImage);
+        GLES20.glFramebufferTexture2D(GLES20.GL_FRAMEBUFFER, GLES20.GL_COLOR_ATTACHMENT0, GLES20.GL_TEXTURE_2D, compositeTexture[0], 0);
+        GLES20.glViewport(0, 0, outputWidth, outputHeight);
+
+        // Upload SR patch data to its texture
+        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, srPatchTextureId);
+        // The model output is RGB Float.
+        GLES30.glTexImage2D(GLES30.GL_TEXTURE_2D, 0, GLES30.GL_RGB32F, patchWidth, patchHeight, 0, GLES30.GL_RGB, GLES30.GL_FLOAT, srPatchBuffer);
+
+        // Set uniforms for the composite shader
+        GLES20.glUniform1i(uRenderModeHandle, 1); // Mode 1: Composite
+        GLES20.glUniform1i(uDrawPatchHandle, srPatchBuffer != null ? 1 : 0);
+        if (srPatchBuffer != null) {
+            GLES20.glUniform4f(uPatchRectHandle, patchRect[0], patchRect[1], patchRect[2], patchRect[3]);
+        }
+
+        // Bind textures
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, upscaledTexture[0]); // Background
+        GLES20.glUniform1i(uBaseTextureHandle, 0);
+
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE1);
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, srPatchTextureId); // SR Patch
+        GLES20.glUniform1i(uSrPatchTextureHandle, 1);
+
+        // Draw the quad
+        drawQuad();
+
+        // --- Finalization ---
+        slot.fence = EGLExt.eglCreateSyncKHR(eglDisplay, EGLExt.EGL_SYNC_FENCE_KHR, null);
+        GLES20.glFlush();
+        pipelineIndex = (pipelineIndex + 1) % PIPELINE_DEPTH;
+ 
+        // CRITICAL FIX: Unbind the EGLImage from the texture target.
+        // This signals to the driver that we are done with the HardwareBuffer for this frame,
+        // preventing the resource leak. We bind it to our general-purpose upscaled texture
+        // just to ensure it's bound to *something* valid before unbinding the FBO.
+
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
+ 
+        return slot.bitmap;
     }
 
     public void releaseBitmapToPool(Bitmap bitmap) {
@@ -298,9 +351,14 @@ public class OpenGLImageProcessor {
         if (eglDisplay != EGL14.EGL_NO_DISPLAY) {
             EGL14.eglMakeCurrent(eglDisplay, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT);
             if (programHandle != 0) GLES20.glDeleteProgram(programHandle);
-            if (renderTextureHandle[0] != 0) GLES20.glDeleteTextures(1, renderTextureHandle, 0);
-            if (currentInputTextureId != 0) GLES20.glDeleteTextures(1, new int[]{currentInputTextureId}, 0);
-            if (fboHandle[0] != 0) GLES20.glDeleteFramebuffers(1, fboHandle, 0);
+
+            // Delete all textures
+            int[] texturesToDelete = {inputVideoTextureId, srPatchTextureId, upscaledTexture[0], compositeTexture[0]};
+            GLES20.glDeleteTextures(texturesToDelete.length, texturesToDelete, 0);
+
+            // Delete all FBOs
+            GLES20.glDeleteFramebuffers(1, upscaleFbo, 0);
+            GLES20.glDeleteFramebuffers(1, compositeFbo, 0);
 
             if (eglImages != null) {
                 for (EGLImageKHR image : eglImages) {
@@ -325,6 +383,48 @@ public class OpenGLImageProcessor {
     }
 
     // --- Utility Methods ---
+
+    private void drawQuad() {
+        GLES20.glEnableVertexAttribArray(positionHandle);
+        GLES20.glVertexAttribPointer(positionHandle, 2, GLES20.GL_FLOAT, false, 0, vertexBuffer);
+        GLES20.glEnableVertexAttribArray(texCoordHandle);
+        GLES20.glVertexAttribPointer(texCoordHandle, 2, GLES20.GL_FLOAT, false, 0, texCoordBuffer);
+        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4);
+        GLES20.glDisableVertexAttribArray(positionHandle);
+        GLES20.glDisableVertexAttribArray(texCoordHandle);
+    }
+
+    private EGLImageKHR findEglImageForBitmap(Bitmap bitmap) {
+        for (int i = 0; i < allCreatedBitmapsInPool.size(); i++) {
+            if (allCreatedBitmapsInPool.get(i) == bitmap) {
+                return eglImages[i];
+            }
+        }
+        Log.e(TAG, "Could not find EGLImage for the bitmap. This should not happen.");
+        return null;
+    }
+
+    private int createTexture(int width, int height, boolean isFloat) {
+        int[] texture = new int[1];
+        GLES30.glGenTextures(1, texture, 0);
+        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, texture[0]);
+        GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_MIN_FILTER, GLES30.GL_LINEAR);
+        GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_MAG_FILTER, GLES30.GL_LINEAR);
+        GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_WRAP_S, GLES30.GL_CLAMP_TO_EDGE);
+        GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_WRAP_T, GLES30.GL_CLAMP_TO_EDGE);
+        if (width > 0 && height > 0) {
+            if (isFloat) {
+                // For TFLite FLOAT32 output (RGB)
+                GLES30.glTexImage2D(GLES30.GL_TEXTURE_2D, 0, GLES30.GL_RGB32F, width, height, 0, GLES30.GL_RGB, GLES30.GL_FLOAT, null);
+            } else {
+                // For RGBA8 video frames
+                GLES30.glTexImage2D(GLES30.GL_TEXTURE_2D, 0, GLES30.GL_RGBA, width, height, 0, GLES30.GL_RGBA, GLES30.GL_UNSIGNED_BYTE, null);
+            }
+        }
+        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, 0);
+        return texture[0];
+    }
+
     private boolean initEGL() {
         eglDisplay = EGL14.eglGetDisplay(EGL14.EGL_DEFAULT_DISPLAY);
         int[] version = new int[2];

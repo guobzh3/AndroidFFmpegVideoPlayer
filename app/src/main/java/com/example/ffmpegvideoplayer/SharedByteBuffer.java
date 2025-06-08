@@ -7,7 +7,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 public class SharedByteBuffer {
 
-    private static final int POOL_CAPACITY = 16; // Same as other queues
+    private static final int POOL_CAPACITY = 16; // Match the queue capacity
     private static final BlockingQueue<SharedByteBuffer> pool = new ArrayBlockingQueue<>(POOL_CAPACITY);
 
     public final ByteBuffer buffer;
@@ -24,21 +24,13 @@ public class SharedByteBuffer {
     }
 
     public static SharedByteBuffer obtain() {
-        SharedByteBuffer sbb = pool.poll();
-        if (sbb == null) {
-            // Pool is empty, this should ideally not happen if pool size is managed well.
-            // For robustness, we can create a new one, but this will break the pooling mechanism.
-            // Or we can block until one is available.
-            // For now, let's assume the pool is large enough.
-            // A more robust solution might use take() to block.
-            try {
-                return pool.take();
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                return null;
-            }
+        try {
+            // Always block until a buffer is available. This simplifies logic and backpressure.
+            return pool.take();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return null;
         }
-        return sbb;
     }
     public void addRef() {
             addRef(1);

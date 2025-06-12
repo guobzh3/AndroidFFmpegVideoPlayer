@@ -54,8 +54,8 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
 
 // 调用的代码
 extern "C" JNIEXPORT void JNICALL
-Java_com_example_ffmpegvideoplayer_MainActivity_mainDecoder(JNIEnv* env, jobject instance, jstring url) {
-    StreamPlayer player(javaVM, url); // 创建一个player 类
+Java_com_example_ffmpegvideoplayer_MainActivity_mainDecoder(JNIEnv* env, jobject instance, jstring url, jobject buffer) {
+    StreamPlayer player(javaVM, url, buffer); // 创建一个player 类
     player.start();
 }
 

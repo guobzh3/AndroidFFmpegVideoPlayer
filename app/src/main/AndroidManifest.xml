@@ -33,6 +33,7 @@
         android:largeHeap="true"
         android:theme="@style/Theme.FfmpegVideoPlayer"
         android:requestLegacyExternalStorage="true"
+        android:hardwareAccelerated="true"
         tools:targetApi="34">
         <uses-native-library
             android:name="libcdsprpc.so"

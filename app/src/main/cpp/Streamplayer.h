@@ -31,7 +31,7 @@ class StreamPlayer {
 public:
     JNIEnv * env;
     jclass mainActivityClass;
-    jmethodID putDataMethod;
+    jmethodID onFrameReadyMethod;
     jmethodID updateDecoderTimingsMethod;
     jmethodID updateYuvToRgbTimeMethod;
 
@@ -40,12 +40,9 @@ public:
     int video_index;
     int frame_decoded_count;
     SwsContext* sws_ctx;
+    uint8_t* output_buffer;
 
-    // multithread yuv2rgb
-    int thread_num;
-    std::vector<std::thread> process_thread;
-
-    StreamPlayer(JavaVM* javaVM, jstring url) {
+    StreamPlayer(JavaVM* javaVM, jstring url, jobject buffer) {
         // javaVM ： java线程的句柄
         // 要在jni代码的线程中调用java代码的方法，必须把当前线程连接到VM中，获取到一个[JNIEnv*].
         // 该 JNIEnv 将用于线程本地存储。因此，您无法在线程之间共享 JNIEnv。如果代码段无法通过其他方法获取其 JNIEnv，您应该共享 JavaVM，并使用 GetEnv 发现线程的 JNIEnv。（假设该线程包含一个 JNIEnv；请参阅下面的 AttachCurrentThread。
@@ -69,11 +66,11 @@ public:
 
 
         // Get method IDs for all callbacks
-        putDataMethod = env->GetStaticMethodID(mainActivityClass, "putData", "([B)V");
+        onFrameReadyMethod = env->GetStaticMethodID(mainActivityClass, "onFrameReady", "()V");
         updateDecoderTimingsMethod = env->GetStaticMethodID(mainActivityClass, "updateDecoderTimings", "(JJ)V");
         updateYuvToRgbTimeMethod = env->GetStaticMethodID(mainActivityClass, "updateYuvToRgbTime", "(J)V");
 
-        if (putDataMethod == nullptr || updateDecoderTimingsMethod == nullptr || updateYuvToRgbTimeMethod == nullptr) {
+        if (onFrameReadyMethod == nullptr || updateDecoderTimingsMethod == nullptr || updateYuvToRgbTimeMethod == nullptr) {
             LOGI("Failed to find one or more callback methods in MainActivity");
             if (env->ExceptionCheck()) {
                 env->ExceptionDescribe();
@@ -85,12 +82,9 @@ public:
 
         this->frame_decoded_count = 0;
         this->sws_ctx = nullptr;
+        this->output_buffer = (uint8_t*)env->GetDirectBufferAddress(buffer);
         this->deFormatc = createFormatc(url); // 用于读取packet av_read_frame(this->deFormatc, input_packet);
         this->deCodecc = createCodecc(this->deFormatc); // 用于对packet进行解码，avcodec_send_packet(this->deCodecc, received_packet); avcodec_receive_frame(this->deCodecc, input_frame);
-
-        // multithread yuv2rgb
-        this->thread_num = 2;
-        this->process_thread = std::vector<std::thread>(this->thread_num);
     }
 
     AVFormatContext* createFormatc(jstring url) {
@@ -158,7 +152,7 @@ public:
             LOGI("Failed to copy the params to de_codec context");
             throw std::runtime_error("Failed to copy the params to de_codec context");
         }
-        de_codecc->thread_count = 16;
+        de_codecc->thread_count = 4;
         ret = avcodec_open2(de_codecc, de_codec, nullptr); // 打开编码器
         if (ret < 0) {
             LOGI("Failed to open de_codecc");
@@ -284,21 +278,7 @@ public:
             }
         }
 
-        // 4 bytes per pixel for RGBA
-        jbyteArray outFrame = env->NewByteArray(width * height * 4);
-        if (outFrame == nullptr) {
-            LOGI("Failed to allocate memory for outFrame jbyteArray");
-            return -1;
-        }
-
-        jbyte* outData = env->GetByteArrayElements(outFrame, nullptr);
-        if (outData == nullptr) {
-            LOGI("outData is nullptr, failed to get byte array elements");
-            env->DeleteLocalRef(outFrame);
-            return -1;
-        }
-
-        uint8_t* dst_data[1] = { (uint8_t*)outData };
+        uint8_t* dst_data[1] = { output_buffer };
         int dst_linesize[1] = { width * 4 };
 
         auto startTime = std::chrono::high_resolution_clock::now();
@@ -312,9 +292,8 @@ public:
         // Call JNI method to update YUV->RGB time
         env->CallStaticVoidMethod(mainActivityClass, updateYuvToRgbTimeMethod, (jlong)durationUs);
 
-        env->ReleaseByteArrayElements(outFrame, outData, 0); // Mode 0: copy back and free the buffer
-        env->CallStaticVoidMethod(mainActivityClass, putDataMethod, outFrame);
-        env->DeleteLocalRef(outFrame);
+        // Notify Java that a frame is ready in the buffer
+        env->CallStaticVoidMethod(mainActivityClass, onFrameReadyMethod);
 
         return 0;
     }

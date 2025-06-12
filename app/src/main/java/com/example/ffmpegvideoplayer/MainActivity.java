@@ -25,10 +25,12 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import androidx.appcompat.app.AppCompatActivity;
+import android.view.Choreographer;
 
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.List;
+import java.util.Timer;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ConcurrentLinkedDeque;
@@ -144,6 +146,11 @@ public class MainActivity extends AppCompatActivity {
     private Handler handler;
     private Handler logHandler;
     private volatile Bitmap mLastDisplayedBitmap = null;
+    private static ByteBuffer videoFrameBuffer;
+
+    private Choreographer choreographer;
+    private Choreographer.FrameCallback displayCallback;
+    private volatile boolean isDisplayLoopRunning = false;
 
     private TextView fpsTextView;
     private boolean isPICO = true;
@@ -173,22 +180,6 @@ public class MainActivity extends AppCompatActivity {
         }
     };
 
-    private final Runnable displayer = () -> {
-        final Bitmap bitmapToDisplay = displayQueue.poll();
-        if (bitmapToDisplay == null) return;
-
-        if (imageView != null && !bitmapToDisplay.isRecycled()) {
-            Bitmap oldBitmap = mLastDisplayedBitmap;
-            imageView.setImageBitmap(bitmapToDisplay);
-            mLastDisplayedBitmap = bitmapToDisplay;
-
-            if (oldBitmap != null && oldBitmap != bitmapToDisplay) {
-                openGLImageProcessor.releaseBitmapToPool(oldBitmap);
-            }
-        } else if (openGLImageProcessor != null) {
-            openGLImageProcessor.releaseBitmapToPool(bitmapToDisplay);
-        }
-    };
 
     private void initModel() {
         try {
@@ -223,6 +214,31 @@ public class MainActivity extends AppCompatActivity {
 
         fpsTextView = findViewById(R.id.inference_time);
 
+        choreographer = Choreographer.getInstance();
+        displayCallback = new Choreographer.FrameCallback() {
+            @Override
+            public void doFrame(long frameTimeNanos) {
+                if (!isDisplayLoopRunning) {
+                    return;
+                }
+                final Bitmap bitmapToDisplay = displayQueue.poll();
+                if (bitmapToDisplay != null) {
+                    if (imageView != null && !bitmapToDisplay.isRecycled()) {
+                        Bitmap oldBitmap = mLastDisplayedBitmap;
+                        imageView.setImageBitmap(bitmapToDisplay);
+                        mLastDisplayedBitmap = bitmapToDisplay;
+
+                        if (oldBitmap != null && oldBitmap != bitmapToDisplay) {
+                            openGLImageProcessor.releaseBitmapToPool(oldBitmap);
+                        }
+                    } else if (openGLImageProcessor != null) {
+                        openGLImageProcessor.releaseBitmapToPool(bitmapToDisplay);
+                    }
+                }
+                // Keep the pump running for the next frame
+                choreographer.postFrameCallback(this);
+            }
+        };
 
         // imageProcessorTFLiteInput is no longer needed as normalization is done manually.
 
@@ -259,6 +275,8 @@ public class MainActivity extends AppCompatActivity {
             rgbaPatchBufferPool.offer(ByteBuffer.allocateDirect(patchBufferSize).order(ByteOrder.nativeOrder()));
         }
 
+        videoFrameBuffer = ByteBuffer.allocateDirect(VIDEO_INPUT_W * VIDEO_INPUT_H * 4).order(ByteOrder.nativeOrder());
+
         java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(4);
 
         prepareTfInputThread = new Thread(() -> prepareTfInputLoop(latch), "PrepareTfInputThread");
@@ -272,13 +290,24 @@ public class MainActivity extends AppCompatActivity {
  
         afterProcessThread = new Thread(() -> patchDataLoop(latch), "PatchDataThread"); // Renamed
         afterProcessThread.start();
+
+        try {
+            latch.await();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            Log.e(TAG_MAIN, "Initialization interrupted while waiting for processing threads.", e);
+            return;
+        }
+        System.gc();
+
+        isDisplayLoopRunning = true;
+        choreographer.postFrameCallback(displayCallback);
  
         new Thread(() -> {
             try {
-                Log.i(TAG_MAIN, "Waiting for processing threads to initialize...");
-                latch.await(); // Wait for all threads to be ready
+                Thread.sleep(3000);
                 Log.i(TAG_MAIN, "All processing threads are ready. Starting decoder.");
-                mainDecoder(getString(R.string.video_url));
+                mainDecoder(getString(R.string.video_url), videoFrameBuffer);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 Log.e(TAG_MAIN, "Decoder thread interrupted while waiting for processing threads.", e);
@@ -411,7 +440,7 @@ public class MainActivity extends AppCompatActivity {
                     if (finalCompositedBitmap != null) {
                         displayQueue.clear();
                         displayQueue.offer(finalCompositedBitmap);
-                        handler.post(displayer);
+                        // The Choreographer loop will pick up the frame. No need to post a runnable.
                         updateTextView(); // Update TextView with new performance data
                     }
                 }
@@ -642,18 +671,19 @@ public class MainActivity extends AppCompatActivity {
         recentYuvToRgbTimes.add(durationUs * 1000);
     }
 
-    // 从 JNI 调用, now receives RGBA data
-    public static void putData(byte[] rgbaData) {
+    // JNI calls this when a frame is ready in the pre-allocated buffer
+    public static void onFrameReady() {
         SharedByteBuffer sharedBuffer = null;
         try {
             sharedBuffer = SharedByteBuffer.obtain();
             if (sharedBuffer == null) {
-                Log.e(TAG_JNI, "Failed to obtain a shared buffer for RGBA data. Skipping frame.");
+                Log.e(TAG_JNI, "Failed to obtain a shared buffer. Skipping frame.");
                 return;
             }
 
+            videoFrameBuffer.position(0);
             sharedBuffer.buffer.position(0);
-            sharedBuffer.buffer.put(rgbaData);
+            sharedBuffer.buffer.put(videoFrameBuffer);
             sharedBuffer.buffer.position(0);
 
             // Add a reference for each queue it's being added to.
@@ -663,15 +693,15 @@ public class MainActivity extends AppCompatActivity {
 
         } catch (InterruptedException e) {
             if (sharedBuffer != null) {
-                sharedBuffer.release(); // Release if interrupted before putting into queues
+                sharedBuffer.release();
             }
-            Log.e(TAG_JNI, "putData interrupted");
+            Log.e(TAG_JNI, "onFrameReady interrupted");
             Thread.currentThread().interrupt();
         } catch (Exception e) {
             if (sharedBuffer != null) {
                 sharedBuffer.release();
             }
-            Log.e(TAG_JNI, "Error in putData: " + e.getMessage(), e);
+            Log.e(TAG_JNI, "Error in onFrameReady: " + e.getMessage(), e);
         }
     }
 
@@ -682,6 +712,11 @@ public class MainActivity extends AppCompatActivity {
         processingRunning = false; // Signal loops to stop
  
         logHandler.removeCallbacks(logRunnable);
+
+        isDisplayLoopRunning = false;
+        if (choreographer != null) {
+            choreographer.removeFrameCallback(displayCallback);
+        }
 
         // 中断线程以使其脱离阻塞队列操作
         if (prepareTfInputThread != null) {
@@ -740,7 +775,7 @@ public class MainActivity extends AppCompatActivity {
     }
  
     // 本地方法声明
-    public native void mainDecoder(String url);
+    public native void mainDecoder(String url, ByteBuffer buffer);
     private native void cropAndNormalizeRgbaToRgbFloat(ByteBuffer input, ByteBuffer output, int cropX, int cropY, int cropW, int cropH, int inputW);
     private native void convertFloatRgbToRgbaUint8(ByteBuffer floatRgbInput, ByteBuffer rgbaUint8Output, int width, int height);
 }

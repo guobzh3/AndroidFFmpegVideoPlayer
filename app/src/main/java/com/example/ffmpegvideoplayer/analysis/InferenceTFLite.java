@@ -35,7 +35,7 @@ import java.util.concurrent.BlockingQueue;
 public class InferenceTFLite {
 
     private static final String TAG = "[Inference TFLite]";
-    private final String MODEL_FILE = "quicsr_ds_dStride2_270pto540p_noresnet.tflite";
+    private final String MODEL_FILE = "quicsr_270p.tflite";
     private final Size INPNUT_SIZE = new Size(480, 270); // Width, Height
     private final int[] OUTPUT_SIZE = new int[]{1, 540, 960, 1}; // N, H, W, C
     private final Boolean IS_INT8 = true; // 用于量化路径的用户定义标志

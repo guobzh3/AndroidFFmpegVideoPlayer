@@ -152,7 +152,7 @@ public:
             LOGI("Failed to copy the params to de_codec context");
             throw std::runtime_error("Failed to copy the params to de_codec context");
         }
-        de_codecc->thread_count = 4;
+        de_codecc->thread_count = 6;
         ret = avcodec_open2(de_codecc, de_codec, nullptr); // 打开编码器
         if (ret < 0) {
             LOGI("Failed to open de_codecc");
@@ -271,7 +271,7 @@ public:
         if (this->sws_ctx == nullptr) {
             this->sws_ctx = sws_getContext(width, height, (AVPixelFormat)frame->format,
                                      width, height, AV_PIX_FMT_RGBA,
-                                     SWS_BILINEAR, nullptr, nullptr, nullptr);
+                                     SWS_BICUBIC, nullptr, nullptr, nullptr);
             if (!this->sws_ctx) {
                 LOGI("Failed to create sws context");
                 return -1;

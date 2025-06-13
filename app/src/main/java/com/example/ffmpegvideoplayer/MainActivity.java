@@ -6,7 +6,7 @@
 package com.example.ffmpegvideoplayer;
 
 import android.graphics.Bitmap;
-
+import android.graphics.SurfaceTexture;
 import android.graphics.ImageFormat;
 import android.graphics.Matrix;
 import android.graphics.Canvas;
@@ -14,13 +14,13 @@ import android.graphics.Paint;
 import android.graphics.Rect;
 import android.os.Bundle;
 import android.os.Handler;
+import android.os.HandlerThread;
 import android.os.Looper;
 import android.renderscript.ScriptIntrinsicResize;
 import android.renderscript.ScriptIntrinsicYuvToRGB;
 import android.renderscript.Type;
 import android.util.Log;
-import android.view.SurfaceView;
-import android.widget.ImageView;
+import android.view.TextureView;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -141,16 +141,11 @@ public class MainActivity extends AppCompatActivity {
         System.loadLibrary("ffmpegvideoplayer");
     }
 
-    private SurfaceView surfaceView;
-    private ImageView imageView;
-    private Handler handler;
-    private Handler logHandler;
-    private volatile Bitmap mLastDisplayedBitmap = null;
+    private TextureView textureView;
+    private Handler handler; // For UI updates
+    private Handler logHandler; // For background logging
+    private HandlerThread logThread;
     private static ByteBuffer videoFrameBuffer;
-
-    private Choreographer choreographer;
-    private Choreographer.FrameCallback displayCallback;
-    private volatile boolean isDisplayLoopRunning = false;
 
     private TextView fpsTextView;
     private boolean isPICO = true;
@@ -169,13 +164,17 @@ public class MainActivity extends AppCompatActivity {
     private Thread afterProcessThread;
     private OpenGLImageProcessor openGLImageProcessor;
     private volatile boolean openGLImageProcessorIsSetup = false;
-
+    private final List<Long> reusableList = new LinkedList<>();
     private final Runnable logRunnable = new Runnable() {
         @Override
         public void run() {
-            logPerformanceAndQueueSizes();
+            if (!processingRunning) return;
+            
+            logPerformanceAndQueueSizes(); // This runs on the logThread
+            handler.post(MainActivity.this::updateTextView); // Post UI update back to main thread
+            
             if (processingRunning) {
-                logHandler.postDelayed(this, 1000); // Log every 1 second
+                logHandler.postDelayed(this, 1000); // Schedule next run on logThread
             }
         }
     };
@@ -207,40 +206,44 @@ public class MainActivity extends AppCompatActivity {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
 
-        surfaceView = findViewById(R.id.surfaceView);
-        imageView = findViewById(R.id.imageView);
-        handler = new Handler(Looper.getMainLooper());
-        logHandler = new Handler(Looper.getMainLooper());
+        textureView = findViewById(R.id.textureView);
+        handler = new Handler(Looper.getMainLooper()); // Main thread handler for UI
+        
+        // Create a dedicated thread for logging
+        logThread = new HandlerThread("LoggingThread");
+        logThread.start();
+        logHandler = new Handler(logThread.getLooper()); // logHandler is now on the background thread
 
         fpsTextView = findViewById(R.id.inference_time);
 
-        choreographer = Choreographer.getInstance();
-        displayCallback = new Choreographer.FrameCallback() {
+        textureView.setSurfaceTextureListener(new TextureView.SurfaceTextureListener() {
             @Override
-            public void doFrame(long frameTimeNanos) {
-                if (!isDisplayLoopRunning) {
-                    return;
+            public void onSurfaceTextureAvailable(SurfaceTexture surface, int width, int height) {
+                if (openGLImageProcessor != null) {
+                    openGLImageProcessor.setSurface(surface, width, height);
                 }
-                final Bitmap bitmapToDisplay = displayQueue.poll();
-                if (bitmapToDisplay != null) {
-                    if (imageView != null && !bitmapToDisplay.isRecycled()) {
-                        Bitmap oldBitmap = mLastDisplayedBitmap;
-                        imageView.setImageBitmap(bitmapToDisplay);
-                        mLastDisplayedBitmap = bitmapToDisplay;
-
-                        if (oldBitmap != null && oldBitmap != bitmapToDisplay) {
-                            openGLImageProcessor.releaseBitmapToPool(oldBitmap);
-                        }
-                    } else if (openGLImageProcessor != null) {
-                        openGLImageProcessor.releaseBitmapToPool(bitmapToDisplay);
-                    }
-                }
-                // Keep the pump running for the next frame
-                choreographer.postFrameCallback(this);
             }
-        };
 
-        // imageProcessorTFLiteInput is no longer needed as normalization is done manually.
+            @Override
+            public void onSurfaceTextureSizeChanged(SurfaceTexture surface, int width, int height) {
+                if (openGLImageProcessor != null) {
+                    openGLImageProcessor.onSurfaceSizeChanged(width, height);
+                }
+            }
+
+            @Override
+            public boolean onSurfaceTextureDestroyed(SurfaceTexture surface) {
+                if (openGLImageProcessor != null) {
+                    openGLImageProcessor.setSurface(null, 0, 0);
+                }
+                return true;
+            }
+
+            @Override
+            public void onSurfaceTextureUpdated(SurfaceTexture surface) {
+                // Invoked every time a new frame is available
+            }
+        });
 
         initModel();
 
@@ -300,8 +303,6 @@ public class MainActivity extends AppCompatActivity {
         }
         System.gc();
 
-        isDisplayLoopRunning = true;
-        choreographer.postFrameCallback(displayCallback);
  
         new Thread(() -> {
             try {
@@ -394,8 +395,6 @@ public class MainActivity extends AppCompatActivity {
         while (processingRunning) {
             SharedByteBuffer sharedBuffer = null;
             InferenceResult inferenceResult = null;
-            Bitmap finalCompositedBitmap = null;
- 
             try {
                 long loopStart = System.nanoTime();
 
@@ -419,7 +418,7 @@ public class MainActivity extends AppCompatActivity {
 
                     // 3. Perform Pass 2: Composite
                     long pass2Start = System.nanoTime();
-                    finalCompositedBitmap = openGLImageProcessor.performCompositePass(
+                    openGLImageProcessor.performCompositePass(
                             inferenceResult.patchBuffer,
                             inferenceResult.patchWidth,
                             inferenceResult.patchHeight,
@@ -433,16 +432,9 @@ public class MainActivity extends AppCompatActivity {
                     inferenceResult = null; // Avoid accidental reuse
 
                     long gpuWorkEnd = System.nanoTime();
-                    // This is not a primary metric, so we don't average it.
-                    // gpuTotalTimeMs.set((gpuWorkEnd - gpuWorkStart) / 1_000_000);
-
-                    // 5. Post the final bitmap to the UI thread for display
-                    if (finalCompositedBitmap != null) {
-                        displayQueue.clear();
-                        displayQueue.offer(finalCompositedBitmap);
-                        // The Choreographer loop will pick up the frame. No need to post a runnable.
-                        updateTextView(); // Update TextView with new performance data
-                    }
+                    
+                    // 5. Update the UI - This is now handled by the dedicated log thread
+                    // updateTextView();
                 }
             } catch (InterruptedException e) {
                 Log.w(TAG_UPSAMPLE, "Loop interrupted.");
@@ -458,7 +450,12 @@ public class MainActivity extends AppCompatActivity {
                 }
             }
         }
-        Log.i(TAG_UPSAMPLE, "Loop Finished (OpenGL ES Rendering Thread)");
+        // Clean up OpenGL resources on the correct thread.
+        if (openGLImageProcessor != null) {
+            openGLImageProcessor.release();
+            openGLImageProcessor = null;
+        }
+        Log.i(TAG_UPSAMPLE, "Loop Finished and GL resources released (OpenGL ES Rendering Thread)");
     }
 
     private void inferenceLoop(java.util.concurrent.CountDownLatch latch) {
@@ -592,19 +589,19 @@ public class MainActivity extends AppCompatActivity {
         });
     }
 
-    private long calculateAndClearAverage(Deque<Long> dataQueue) {
+    private long calculateAndClearAverage(Deque<Long> dataQueue, List<Long> reusableList) {
         if (dataQueue.isEmpty()) {
             return 0;
         }
         long sum = 0;
         int count = 0;
-        // Drain the queue to avoid concurrent modification issues and get a stable size
-        List<Long> items = new LinkedList<>();
+        // Drain the queue to the reusable list to avoid allocation
+        reusableList.clear();
         while (!dataQueue.isEmpty()) {
-            items.add(dataQueue.poll());
+            reusableList.add(dataQueue.poll());
         }
 
-        for (Long nanoTime : items) {
+        for (Long nanoTime : reusableList) {
             sum += nanoTime;
             count++;
         }
@@ -613,13 +610,13 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void logPerformanceAndQueueSizes() {
-        // Calculate averages for the last second
-        avgInferenceTimeUs.set(calculateAndClearAverage(recentInferenceTimes));
-        avgUpsamplePassTimeUs.set(calculateAndClearAverage(recentUpsamplePassTimes));
-        avgCompositePassTimeUs.set(calculateAndClearAverage(recentCompositePassTimes));
-        avgYuvToRgbTimeUs.set(calculateAndClearAverage(recentYuvToRgbTimes));
-        avgPrepareTfInputProcessingTimeUs.set(calculateAndClearAverage(recentPrepareTfInputProcessingTimes));
-        avgPatchDataProcessingTimeUs.set(calculateAndClearAverage(recentPatchDataProcessingTimes));
+        // Calculate averages for the last second using the reusable list
+        avgInferenceTimeUs.set(calculateAndClearAverage(recentInferenceTimes, reusableList));
+        avgUpsamplePassTimeUs.set(calculateAndClearAverage(recentUpsamplePassTimes, reusableList));
+        avgCompositePassTimeUs.set(calculateAndClearAverage(recentCompositePassTimes, reusableList));
+        avgYuvToRgbTimeUs.set(calculateAndClearAverage(recentYuvToRgbTimes, reusableList));
+        avgPrepareTfInputProcessingTimeUs.set(calculateAndClearAverage(recentPrepareTfInputProcessingTimes, reusableList));
+        avgPatchDataProcessingTimeUs.set(calculateAndClearAverage(recentPatchDataProcessingTimes, reusableList));
 
         String logMsg = String.format(Locale.US,
                 """
@@ -711,11 +708,14 @@ public class MainActivity extends AppCompatActivity {
         Log.i(TAG_MAIN, "onDestroy: Shutting down threads/resources.");
         processingRunning = false; // Signal loops to stop
  
-        logHandler.removeCallbacks(logRunnable);
-
-        isDisplayLoopRunning = false;
-        if (choreographer != null) {
-            choreographer.removeFrameCallback(displayCallback);
+        if (logThread != null) {
+            logHandler.removeCallbacks(logRunnable);
+            logThread.quitSafely(); // Safely quit the looper
+            try {
+                logThread.join(500); // Wait for the thread to finish
+            } catch (InterruptedException e) {
+                Log.e(TAG_MAIN, "Interrupted while joining log thread.", e);
+            }
         }
 
         // 中断线程以使其脱离阻塞队列操作
@@ -760,16 +760,10 @@ public class MainActivity extends AppCompatActivity {
             srTFLite.close(); // 假设 InferenceTFLite 有一个 close() 方法
         }
  
-        // The last displayed bitmap is from our pool and must be returned to it.
-        if (mLastDisplayedBitmap != null && openGLImageProcessor != null) {
-            openGLImageProcessor.releaseBitmapToPool(mLastDisplayedBitmap);
-            mLastDisplayedBitmap = null;
-        }
+        // With TextureView, there's no mLastDisplayedBitmap to manage.
 
-        if (openGLImageProcessor != null) {
-            openGLImageProcessor.release();
-            openGLImageProcessor = null;
-        }
+        // The release of openGLImageProcessor is now handled within the upsampleLoop
+        // to ensure it happens on the correct GL thread.
  
         Log.i(TAG_MAIN, "onDestroy finished.");
     }

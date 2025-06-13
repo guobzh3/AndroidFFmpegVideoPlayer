@@ -1,5 +1,7 @@
 package com.example.ffmpegvideoplayer;
 
+import android.util.Log;
+
 import java.nio.ByteBuffer;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
@@ -48,5 +50,6 @@ public class SharedByteBuffer {
             buffer.clear();
             pool.offer(this);
         }
+        if (pool.size() < 8) Log.i("buffer", "Buffer released, pool capicity: " +  pool.size());
     }
 }

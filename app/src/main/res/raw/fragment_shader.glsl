@@ -107,7 +107,9 @@ void main() {
     } else {
         // --- Pass 2: Composite ---
         // By default, the color is from the upscaled background texture.
-        vec4 finalColor = texture2D(u_BaseTexture, v_coord);
+        // Flip the Y-coordinate for the base texture to correct the upside-down issue.
+        vec2 flipped_v_coord = vec2(v_coord.x, 1.0 - v_coord.y);
+        vec4 finalColor = texture2D(u_BaseTexture, flipped_v_coord);
 
         // If the patch should be drawn and we are inside its rectangle...
         if (u_DrawPatch &&
@@ -115,6 +117,7 @@ void main() {
             v_coord.y >= u_PatchRect.y && v_coord.y <= u_PatchRect.y + u_PatchRect.w) {
 
             // Map the screen coordinate to the patch's own texture coordinate.
+            // The patch itself is oriented correctly, so we use the original v_coord for this calculation.
             vec2 patchCoord = (v_coord.xy - u_PatchRect.xy) / u_PatchRect.zw;
             finalColor = texture2D(u_SrPatchTexture, patchCoord);
         }

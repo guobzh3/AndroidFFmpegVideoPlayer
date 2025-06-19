@@ -304,16 +304,20 @@ public class MainActivity extends AppCompatActivity {
         System.gc();
 
  
+        // The new StreamPlayer is initialized and started from a dedicated thread
+        // after other processing threads are ready.
         new Thread(() -> {
             try {
-                Thread.sleep(3000);
-                Log.i(TAG_MAIN, "All processing threads are ready. Starting decoder.");
-                mainDecoder(getString(R.string.video_url), videoFrameBuffer);
+                // A short delay to ensure other threads are fully initialized before starting the native player
+                Thread.sleep(1000);
+                Log.i(TAG_MAIN, "All processing threads are ready. Initializing and starting native player.");
+                nativeInitPlayer(getString(R.string.video_url), videoFrameBuffer);
+                nativeStartPlayer();
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
-                Log.e(TAG_MAIN, "Decoder thread interrupted while waiting for processing threads.", e);
+                Log.e(TAG_MAIN, "Player startup thread interrupted.", e);
             }
-        }, "DecoderThread").start();
+        }, "PlayerStartThread").start();
     }
 
 
@@ -707,7 +711,10 @@ public class MainActivity extends AppCompatActivity {
         super.onDestroy();
         Log.i(TAG_MAIN, "onDestroy: Shutting down threads/resources.");
         processingRunning = false; // Signal loops to stop
- 
+
+        Log.i(TAG_MAIN, "Stopping native player.");
+        nativeStopPlayer(); // Stop the C++ threads and release resources
+
         if (logThread != null) {
             logHandler.removeCallbacks(logRunnable);
             logThread.quitSafely(); // Safely quit the looper
@@ -769,7 +776,11 @@ public class MainActivity extends AppCompatActivity {
     }
  
     // 本地方法声明
-    public native void mainDecoder(String url, ByteBuffer buffer);
+    // --- Native methods for the new StreamPlayer ---
+    private native void nativeInitPlayer(String url, ByteBuffer buffer);
+    private native void nativeStartPlayer();
+    private native void nativeStopPlayer();
+
     private native void cropAndNormalizeRgbaToRgbFloat(ByteBuffer input, ByteBuffer output, int cropX, int cropY, int cropW, int cropH, int inputW);
     private native void convertFloatRgbToRgbaUint8(ByteBuffer floatRgbInput, ByteBuffer rgbaUint8Output, int width, int height);
 }

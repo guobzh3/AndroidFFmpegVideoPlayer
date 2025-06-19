@@ -1,329 +1,397 @@
+// streamplayer.h
 //
 // Created by chaibli on 2024/5/21.
 //
 
-// JNI 定义了两个关键数据结构，即“JavaVM”和“JNIEnv”。两者本质上都是指向函数表的指针。 JavaVM 提供“调用接口”函数，用于创建和销毁 JavaVM；JNIEnv 提供了大部分 JNI 函数。您的原生函数都会接收 JNIEnv 作为第一个参数
 #ifndef FFMPEGVIDEOPLAYER_STREAMPLAYER_H
 #define FFMPEGVIDEOPLAYER_STREAMPLAYER_H
 
-
-extern  "C" {
+extern "C" {
 #include <libavformat/avformat.h>
 #include <libavcodec/avcodec.h>
 #include <libavutil/avutil.h>
 #include <libswscale/swscale.h>
 #include <libavutil/imgutils.h>
+#include <pthread.h> // For naming threads
 }
+
 #include <jni.h>
 #include <string>
 #include <thread>
 #include <vector>
-#include <stdlib.h>
+#include <queue>
+#include <mutex>
+#include <condition_variable>
+#include <atomic>
 #include <chrono>
 #include <android/log.h>
 
 #define LOG_TAG "MyNativeCode"
-#define TIME_TAG "PerfTime" // Consistent with Java tags
+#define TIME_TAG "PerfTime"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
 #define LOG_TIME(...) __android_log_print(ANDROID_LOG_INFO, TIME_TAG, __VA_ARGS__)
 
+// A thread-safe queue for AVPacket pointers, serving as a jitter buffer.
+const int PACKET_QUEUE_MAX_SIZE = 150; // Buffer for ~5 seconds of video at 30fps
+
+class PacketQueue {
+public:
+    PacketQueue() = default;
+
+    bool push(AVPacket* packet) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        cond_not_full_.wait(lock, [this] {
+            return abort_request_ || queue_.size() < PACKET_QUEUE_MAX_SIZE;
+        });
+
+        if (abort_request_) {
+            return false;
+        }
+
+        queue_.push(packet);
+        cond_not_empty_.notify_one();
+        return true;
+    }
+
+    bool pop(AVPacket** packet) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        cond_not_empty_.wait(lock, [this] {
+            return abort_request_ || !queue_.empty();
+        });
+
+        if (abort_request_ && queue_.empty()) {
+            return false;
+        }
+
+        *packet = queue_.front();
+        queue_.pop();
+        cond_not_full_.notify_one();
+        return true;
+    }
+
+    void abort() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        abort_request_ = true;
+        cond_not_empty_.notify_all();
+        cond_not_full_.notify_all();
+    }
+
+private:
+    std::queue<AVPacket*> queue_;
+    std::mutex mutex_;
+    std::condition_variable cond_not_empty_;
+    std::condition_variable cond_not_full_;
+    std::atomic<bool> abort_request_{false};
+};
+
 class StreamPlayer {
 public:
-    JNIEnv * env;
-    jclass mainActivityClass;
-    jmethodID onFrameReadyMethod;
-    jmethodID updateDecoderTimingsMethod;
-    jmethodID updateYuvToRgbTimeMethod;
-
-    AVFormatContext* deFormatc; // 是一个FormatContext
-    AVCodecContext* deCodecc; // 是一个CodecContext
-    int video_index;
-    int frame_decoded_count;
-    SwsContext* sws_ctx;
-    uint8_t* output_buffer;
-
-    StreamPlayer(JavaVM* javaVM, jstring url, jobject buffer) {
-        // javaVM ： java线程的句柄
-        // 要在jni代码的线程中调用java代码的方法，必须把当前线程连接到VM中，获取到一个[JNIEnv*].
-        // 该 JNIEnv 将用于线程本地存储。因此，您无法在线程之间共享 JNIEnv。如果代码段无法通过其他方法获取其 JNIEnv，您应该共享 JavaVM，并使用 GetEnv 发现线程的 JNIEnv。（假设该线程包含一个 JNIEnv；请参阅下面的 AttachCurrentThread。
-        // 将jvm附加到当前线程，后面才可以进行JNI调用
-        // 通过 JNI 附加的线程必须在退出之前调用 DetachCurrentThread()
-//        LOGI("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
-        if (javaVM->AttachCurrentThread(&env, nullptr) != 0) {
-            LOGI("Failed to attach current thread");
-            throw std::runtime_error("Failed to attach current thread");
-        }
-        // 找到这个java中中class ? 这个有什么用？
-        mainActivityClass = env->FindClass("com/example/ffmpegvideoplayer/MainActivity");
-        if (mainActivityClass == nullptr) {
-            // ... (error handling as before)
-            throw std::runtime_error("Failed to find class MainActivity");
-        }
-
-        // Make it a global reference to be safe across threads, though in this specific
-        // implementation it might not be strictly necessary as JNIEnv is thread-local.
-        mainActivityClass = (jclass)env->NewGlobalRef(mainActivityClass);
-
-
-        // Get method IDs for all callbacks
-        onFrameReadyMethod = env->GetStaticMethodID(mainActivityClass, "onFrameReady", "()V");
-        updateDecoderTimingsMethod = env->GetStaticMethodID(mainActivityClass, "updateDecoderTimings", "(JJ)V");
-        updateYuvToRgbTimeMethod = env->GetStaticMethodID(mainActivityClass, "updateYuvToRgbTime", "(J)V");
-
-        if (onFrameReadyMethod == nullptr || updateDecoderTimingsMethod == nullptr || updateYuvToRgbTimeMethod == nullptr) {
-            LOGI("Failed to find one or more callback methods in MainActivity");
-            if (env->ExceptionCheck()) {
-                env->ExceptionDescribe();
-                env->ExceptionClear();
+    // JNI 定义了两个关键数据结构，即“JavaVM”和“JNIEnv”。两者本质上都是指向函数表的指针。
+    // JavaVM 提供“调用接口”函数，用于创建和销毁 JavaVM。
+    // *** FIX: Constructor now accepts JNIEnv* directly and does not Attach/Detach ***
+    StreamPlayer(JavaVM* javaVM, JNIEnv* env, jstring url, jobject buffer) : jvm_(javaVM) {
+        try {
+            mainActivityClass = env->FindClass("com/example/ffmpegvideoplayer/MainActivity");
+            if (mainActivityClass == nullptr) {
+                throw std::runtime_error("Failed to find class MainActivity");
             }
-            javaVM->DetachCurrentThread();
-            throw std::runtime_error("Failed to find JNI callback methods");
-        }
+            // Make it a global reference to be safe across threads.
+            mainActivityClass = (jclass)env->NewGlobalRef(mainActivityClass);
 
-        this->frame_decoded_count = 0;
-        this->sws_ctx = nullptr;
-        this->output_buffer = (uint8_t*)env->GetDirectBufferAddress(buffer);
-        this->deFormatc = createFormatc(url); // 用于读取packet av_read_frame(this->deFormatc, input_packet);
-        this->deCodecc = createCodecc(this->deFormatc); // 用于对packet进行解码，avcodec_send_packet(this->deCodecc, received_packet); avcodec_receive_frame(this->deCodecc, input_frame);
+            onFrameReadyMethod = env->GetStaticMethodID(mainActivityClass, "onFrameReady", "()V");
+            updateDecoderTimingsMethod = env->GetStaticMethodID(mainActivityClass, "updateDecoderTimings", "(JJ)V");
+            updateYuvToRgbTimeMethod = env->GetStaticMethodID(mainActivityClass, "updateYuvToRgbTime", "(J)V");
+
+            if (!onFrameReadyMethod || !updateDecoderTimingsMethod || !updateYuvToRgbTimeMethod) {
+                throw std::runtime_error("Failed to find one or more JNI callback methods");
+            }
+
+            output_buffer_ = (uint8_t*)env->GetDirectBufferAddress(buffer);
+            deFormatc_ = createFormatc(env, url);
+            deCodecc_ = createCodecc(deFormatc_);
+
+            reusable_frame_ = av_frame_alloc();
+            if (!reusable_frame_) {
+                throw std::runtime_error("Failed to allocate reusable AVFrame");
+            }
+        } catch (const std::runtime_error& e) {
+            // Robust cleanup in case of constructor failure
+            LOGI("Exception during StreamPlayer construction: %s", e.what());
+            cleanup(env);
+            throw; // Re-throw to notify Java side of the failure
+        }
+        LOGI("StreamPlayer initialized successfully.");
     }
 
-    AVFormatContext* createFormatc(jstring url) {
-        // 是一个网址链接
-        const char* video_address = env->GetStringUTFChars(url, nullptr);
-        LOGI("%s", video_address);
-        // create decoder
-        AVFormatContext* av_formatc = avformat_alloc_context(); // avformat_alloc_context();
-        if (!av_formatc) {
-            LOGI("Failed to alloc memory for avformat");
-            throw std::runtime_error("Failed to alloc memory for avformat");
+    ~StreamPlayer() {
+        stop(); // Ensure everything is stopped and cleaned up.
+        JNIEnv* env = nullptr;
+        if (jvm_->AttachCurrentThread(&env, nullptr) == 0) {
+            cleanup(env);
+            jvm_->DetachCurrentThread();
         }
-        // setting params 配置参数
-        AVDictionary* opts = nullptr; // 是ffmpeg中用来存储选项的结构体
-        av_dict_set(&opts, "rtsp_transport", "tcp", 0); // 指定tcp作为RTSP的传输协议
-        // open video 打开文件（注意设置了option参数）
-//        int ret = avformat_open_input(av_formatc,video_address, nullptr , &opts);
-        int ret = avformat_open_input(&av_formatc, video_address, nullptr, &opts);
-        if (ret != 0) {
-            LOGI("Failed to open input file");
-            throw std::runtime_error("Failed to open input file");
-        }
-        // find the input stream
-        // it will be blocked if broadcaster doesn't send the stream
-        LOGI("Waiting for the stream ...");
-        // 获取视频流信息，保存在 av_formatc 中
-        ret = avformat_find_stream_info(av_formatc, nullptr);
-        if (ret != 0) {
-            LOGI("Failed to get stream info");
-            throw std::runtime_error("Failed to get stream info");
-        }
-        return av_formatc; // 返回了avformatc
-    }
-
-    AVCodecContext* createCodecc(AVFormatContext* avFormatc) {
-        if (avFormatc == nullptr) {
-            LOGI("de_formatc is nullptr!");
-            throw std::runtime_error("de_formatc is nullptr!");
-        }
-        AVStream* de_stream = nullptr;
-        // find stream index（获取视频流的stream）
-        for (int i = 0; i < avFormatc->nb_streams; i++) {
-            if (avFormatc->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
-                video_index = i;
-                de_stream = avFormatc->streams[i];
-                break;
-            }
-        }
-        // find de_codec by codec_id
-        const AVCodec* de_codec = avcodec_find_decoder(de_stream->codecpar->codec_id);
-        if (!de_codec) {
-            LOGI("Failed to find the de_codec");
-            throw std::runtime_error("Failed to find the de_codec");
-        }
-        // use the de_codec to create de_codec_context
-        AVCodecContext* de_codecc = avcodec_alloc_context3(de_codec); //创建一个适配该codec的 codec_context
-        if (!de_codecc) {
-            LOGI("Failed to alloc memory for de_codec context");
-            throw std::runtime_error("Failed to alloc memory for de_codec context");
-        }
-        // copy the params from de_stream to de_codec_context
-        //
-        int ret = avcodec_parameters_to_context(de_codecc, de_stream->codecpar);
-        if (ret < 0) {
-            LOGI("Failed to copy the params to de_codec context");
-            throw std::runtime_error("Failed to copy the params to de_codec context");
-        }
-        de_codecc->thread_count = 6;
-        ret = avcodec_open2(de_codecc, de_codec, nullptr); // 打开编码器
-        if (ret < 0) {
-            LOGI("Failed to open de_codecc");
-            throw std::runtime_error("Failed to open de_codecc");
-        }
-        LOGI("Successfully initial AVCodecContext");
-        return de_codecc;
     }
 
     void start() {
-        AVPacket* input_packet = av_packet_alloc();
-        int packet_num = 0;
-        bool stop = false;
-        while (!stop) {
-            auto loopStart = std::chrono::high_resolution_clock::now();
+        if (!player_stopped_.exchange(false)) {
+            // Already running
+            return;
+        }
+        LOGI("Starting player threads...");
+        read_thread_ = std::thread(&StreamPlayer::read_loop, this);
+        decode_thread_ = std::thread(&StreamPlayer::decode_loop, this);
+    }
 
-            auto readStart = std::chrono::high_resolution_clock::now();
-            int ret = av_read_frame(this->deFormatc, input_packet);
-            auto readEnd = std::chrono::high_resolution_clock::now();
-            auto readDuration = std::chrono::duration_cast<std::chrono::microseconds>(readEnd - readStart).count();
+    void stop() {
+        if (player_stopped_.exchange(true)) {
+            return; // Already stopped
+        }
+        LOGI("Stopping StreamPlayer...");
 
-            if (ret < 0) {
-                LOGI("av_read_frame returned %d, stopping.", ret);
-                stop = true;
-            } else {
-                if (input_packet->stream_index == this->video_index) {
-                    ret = decoding(input_packet);
-                    if (ret < 0) {
-                        LOGI("Decoding Error");
-                    }
-                    packet_num++;
-                }
-                // Always unref the packet
-                auto loopEnd = std::chrono::high_resolution_clock::now();
-                auto loopDuration = std::chrono::duration_cast<std::chrono::microseconds>(loopEnd - loopStart).count();
-                
-                // Call JNI method to update timings
-                env->CallStaticVoidMethod(mainActivityClass, updateDecoderTimingsMethod, (jlong)loopDuration, (jlong)readDuration);
+        packet_queue_.abort();
+
+        if (read_thread_.joinable()) {
+            read_thread_.join();
+        }
+        if (decode_thread_.joinable()) {
+            decode_thread_.join();
+        }
+        LOGI("Player threads stopped.");
+    }
+
+private:
+    // JNI and threading members
+    JavaVM* jvm_;
+    jclass mainActivityClass = nullptr;
+    jmethodID onFrameReadyMethod = nullptr;
+    jmethodID updateDecoderTimingsMethod = nullptr;
+    jmethodID updateYuvToRgbTimeMethod = nullptr;
+    std::thread read_thread_;
+    std::thread decode_thread_;
+    std::atomic<bool> player_stopped_{true};
+
+    // FFmpeg members
+    AVFormatContext* deFormatc_ = nullptr;
+    AVCodecContext* deCodecc_ = nullptr;
+    AVFrame* reusable_frame_ = nullptr;
+    SwsContext* sws_ctx_ = nullptr;
+    int video_index_ = -1;
+    PacketQueue packet_queue_;
+
+    // Buffer for output
+    uint8_t* output_buffer_ = nullptr;
+    int frame_decoded_count_ = 0;
+
+    void cleanup(JNIEnv* env) {
+        if (reusable_frame_) av_frame_free(&reusable_frame_);
+        if (sws_ctx_) sws_freeContext(sws_ctx_);
+        if (deCodecc_) avcodec_free_context(&deCodecc_);
+        if (deFormatc_) avformat_close_input(&deFormatc_);
+        if (mainActivityClass) env->DeleteGlobalRef(mainActivityClass);
+
+        reusable_frame_ = nullptr;
+        sws_ctx_ = nullptr;
+        deCodecc_ = nullptr;
+        deFormatc_ = nullptr;
+        mainActivityClass = nullptr;
+    }
+
+    // Producer thread: reads packets from network and puts them into the queue
+    void read_loop() {
+        pthread_setname_np(pthread_self(), "NativeReadThread");
+        LOGI("Read thread started.");
+        while (!player_stopped_) {
+            AVPacket* packet = av_packet_alloc();
+            if (!packet) {
+                LOGI("Failed to allocate AVPacket in read_loop.");
+                break;
             }
 
-            auto loopEnd = std::chrono::high_resolution_clock::now();
-            auto loopDuration = std::chrono::duration_cast<std::chrono::microseconds>(loopEnd - loopStart).count();
-            // LOG_TIME("Decoder - Total: %.2f ms | Read: %.2f ms", loopDuration / 1000.0, readDuration / 1000.0);
+            int ret = av_read_frame(deFormatc_, packet);
+            if (ret < 0) {
+                LOGI("av_read_frame returned %d, end of stream or error. Aborting.", ret);
+                av_packet_free(&packet);
+                packet_queue_.abort(); // Signal consumer to stop
+                break;
+            }
+
+            if (packet->stream_index == video_index_) {
+                if (!packet_queue_.push(packet)) {
+                    av_packet_free(&packet);
+                    break;
+                }
+            } else {
+                av_packet_free(&packet);
+            }
         }
-        // flush decoder
-        int ret = decoding(nullptr);
-        if (ret < 0) {
-            LOGI("Flush decoder Error");
-        }
-        av_packet_free(&input_packet);
-        LOGI("Receiving done!");
+        LOGI("Read thread finished.");
     }
-    /**
-     * 对packet进行解码
-     * @param received_packet
-     * @return
-     */
-    int decoding(AVPacket* received_packet) {
-        AVFrame* input_frame = av_frame_alloc();
-        int ret = avcodec_send_packet(this->deCodecc, received_packet);
+
+    // Consumer thread: takes packets from queue, decodes, and renders
+    void decode_loop() {
+        pthread_setname_np(pthread_self(), "NativeDecodeThread");
+        JNIEnv* env;
+        if (jvm_->AttachCurrentThread(&env, nullptr) != 0) {
+            LOGI("Failed to attach decode_thread to JVM");
+            return;
+        }
+        LOGI("Decode thread started.");
+
+        while (!player_stopped_) {
+            AVPacket* packet = nullptr;
+
+            if (!packet_queue_.pop(&packet)) {
+                break;
+            }
+
+            decoding(env, packet);
+            av_packet_free(&packet);
+        }
+
+        decoding(env, nullptr); // Flush decoder
+
+        jvm_->DetachCurrentThread();
+        LOGI("Decode thread finished.");
+    }
+
+    AVFormatContext* createFormatc(JNIEnv* env, jstring url) {
+        const char* video_address = env->GetStringUTFChars(url, nullptr);
+        LOGI("Opening URL: %s", video_address);
+        AVFormatContext* av_formatc = avformat_alloc_context();
+        if (!av_formatc) {
+            env->ReleaseStringUTFChars(url, video_address);
+            throw std::runtime_error("Failed to alloc memory for avformat");
+        }
+
+        AVDictionary* opts = nullptr;
+        av_dict_set(&opts, "rtsp_transport", "tcp", 0);
+        av_dict_set(&opts, "buffer_size", "2048000", 0);
+        av_dict_set(&opts, "max_delay", "500000", 0);
+        av_dict_set(&opts, "stimeout", "5000000", 0);
+
+        int ret = avformat_open_input(&av_formatc, video_address, nullptr, &opts);
+        env->ReleaseStringUTFChars(url, video_address);
+        av_dict_free(&opts);
+
+        if (ret != 0) {
+            avformat_free_context(av_formatc);
+            throw std::runtime_error("Failed to open input file");
+        }
+
+        LOGI("Waiting for the stream info...");
+        if (avformat_find_stream_info(av_formatc, nullptr) < 0) {
+            avformat_close_input(&av_formatc);
+            throw std::runtime_error("Failed to get stream info");
+        }
+        return av_formatc;
+    }
+
+    AVCodecContext* createCodecc(AVFormatContext* avFormatc) {
+        AVStream* de_stream = nullptr;
+        int v_idx = av_find_best_stream(avFormatc, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
+        if (v_idx < 0) {
+            throw std::runtime_error("Failed to find video stream");
+        }
+        video_index_ = v_idx;
+        de_stream = avFormatc->streams[video_index_];
+        LOGI("Stream codec ID: %s", avcodec_get_name(de_stream->codecpar->codec_id));
+        const AVCodec* de_codec = nullptr;
+        if (de_stream->codecpar->codec_id == AV_CODEC_ID_H264) {
+            LOGI("Stream is H.264, trying to find h264_mediacodec decoder...");
+            de_codec = avcodec_find_decoder_by_name("h264_mediacodec");
+            if (de_codec) LOGI("Found hardware decoder: h264_mediacodec");
+        }
+
+
+        if (de_stream->codecpar->codec_id == AV_CODEC_ID_HEVC) {
+            LOGI("Stream is H.265, trying to find h265_mediacodec decoder...");
+            de_codec = avcodec_find_decoder_by_name("hevc_mediacodec");
+            if (de_codec) LOGI("Found hardware decoder: h265_mediacodec");
+        }
+
+        if (!de_codec) {
+            LOGI("Falling back to default software decoder.");
+            de_codec = avcodec_find_decoder(de_stream->codecpar->codec_id);
+        }
+        if (!de_codec) {
+            throw std::runtime_error("Failed to find any suitable decoder");
+        }
+
+        AVCodecContext* de_codecc = avcodec_alloc_context3(de_codec);
+        if (!de_codecc) {
+            throw std::runtime_error("Failed to alloc memory for de_codec context");
+        }
+        if (avcodec_parameters_to_context(de_codecc, de_stream->codecpar) < 0) {
+            avcodec_free_context(&de_codecc);
+            throw std::runtime_error("Failed to copy params to de_codec context");
+        }
+
+        de_codecc->thread_count = 4;
+        if (avcodec_open2(de_codecc, de_codec, nullptr) < 0) {
+            avcodec_free_context(&de_codecc);
+            throw std::runtime_error("Failed to open de_codecc");
+        }
+        LOGI("Successfully initialized AVCodecContext with decoder: %s", de_codec->name);
+        return de_codecc;
+    }
+
+    int decoding(JNIEnv* env, AVPacket* received_packet) {
+        int ret = avcodec_send_packet(deCodecc_, received_packet);
         if (ret < 0) {
-            LOGI("Error while sending packet to decoder");
             return -1;
         }
         while (ret >= 0) {
-            ret = avcodec_receive_frame(this->deCodecc, input_frame);
+            ret = avcodec_receive_frame(deCodecc_, reusable_frame_);
             if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
                 break;
-            }
-            else if (ret < 0) {
-                LOGI("Error while receiving frame from decoder");
+            } else if (ret < 0) {
                 return ret;
             }
 
-            // 将解码得到的avframe 从 YUV 转化为 ARGB8888格式
-            ret = avFrameYUV420ToARGB8888(input_frame);
+            const int64_t FRAME_MIN_DURATION_US = 32000;
+            auto frame_start_time = std::chrono::high_resolution_clock::now();
 
+            avFrameYUV420ToARGB8888(env, reusable_frame_);
+            frame_decoded_count_++;
 
+            auto frame_end_time = std::chrono::high_resolution_clock::now();
+            auto processing_duration_us = std::chrono::duration_cast<std::chrono::microseconds>(frame_end_time - frame_start_time).count();
 
-            if (ret < 0) {
-                LOGI("Error! avFrameYUV420ToARGB8888");
+            if (processing_duration_us < FRAME_MIN_DURATION_US) {
+                auto sleep_duration = std::chrono::microseconds(FRAME_MIN_DURATION_US - processing_duration_us);
+                std::this_thread::sleep_for(sleep_duration);
             }
-            frame_decoded_count++;
-            
-            if (frame_decoded_count % 30 == 0) LOGI("frame decoded count %d, wdith = %d, height = %d", frame_decoded_count, input_frame->width, input_frame->height);
 
-            av_frame_unref(input_frame);
+            av_frame_unref(reusable_frame_);
         }
-        av_frame_free(&input_frame);
-
         return 0;
     }
 
-    // AVFrame 的内存布局
-    /*             <------------Y-linesize----------->
-      *             <-------------width------------>
-      *             -----------------------------------
-      *             |                              |  |
-      *             |                              |  |
-      *   height    |              Y               |  |
-      *             |                data[0]       |  |
-      *             |                              |  |
-      *             |                              |  |
-      *             -----------------------------------
-      *             |             |  |             |  |
-      * height / 2  |      U      |  |      V      |  |
-      *             |    data[1]  |  | data[2]     |  |
-      *             -----------------------------------
-      *             <---U-linesize--> <--V-linesize--->
-      *             <---U-width--->   <--V-width--->
-  */
-    int avFrameYUV420ToARGB8888(AVFrame* frame) {
+    int avFrameYUV420ToARGB8888(JNIEnv* env, AVFrame* frame) {
         int width = frame->width;
         int height = frame->height;
 
-        if (this->sws_ctx == nullptr) {
-            this->sws_ctx = sws_getContext(width, height, (AVPixelFormat)frame->format,
-                                     width, height, AV_PIX_FMT_RGBA,
-                                     SWS_BICUBIC, nullptr, nullptr, nullptr);
-            if (!this->sws_ctx) {
-                LOGI("Failed to create sws context");
-                return -1;
-            }
+        if (sws_ctx_ == nullptr) {
+            sws_ctx_ = sws_getContext(width, height, (AVPixelFormat)frame->format,
+                                      width, height, AV_PIX_FMT_RGBA,
+                                      SWS_BICUBIC, nullptr, nullptr, nullptr);
+            if (!sws_ctx_) return -1;
         }
 
-        uint8_t* dst_data[1] = { output_buffer };
+        uint8_t* dst_data[1] = { output_buffer_ };
         int dst_linesize[1] = { width * 4 };
 
         auto startTime = std::chrono::high_resolution_clock::now();
-
-        sws_scale(this->sws_ctx, (const uint8_t* const*)frame->data, frame->linesize, 0, height,
+        sws_scale(sws_ctx_, (const uint8_t* const*)frame->data, frame->linesize, 0, height,
                   dst_data, dst_linesize);
-
         auto endTime = std::chrono::high_resolution_clock::now();
         auto durationUs = std::chrono::duration_cast<std::chrono::microseconds>(endTime - startTime).count();
-        
-        // Call JNI method to update YUV->RGB time
-        env->CallStaticVoidMethod(mainActivityClass, updateYuvToRgbTimeMethod, (jlong)durationUs);
 
-        // Notify Java that a frame is ready in the buffer
+        env->CallStaticVoidMethod(mainActivityClass, updateYuvToRgbTimeMethod, (jlong)durationUs);
         env->CallStaticVoidMethod(mainActivityClass, onFrameReadyMethod);
 
         return 0;
     }
-
-    static int YUV2RGB(int y, int u , int v) {
-        int kMaxChannelValue = 262143;
-        // Adjust and check YUV values
-        y = (y - 16) < 0 ? 0 : (y - 16);
-        u -= 128;
-        v -= 128;
-        // This is the floating point equivalent. We do the conversion in integer
-        // because some Android devices do not have floating point in hardware.
-        // nR = (int)(1.164 * nY + 1.596 * nV);
-        // nG = (int)(1.164 * nY - 0.813 * nV - 0.391 * nU);
-        // nB = (int)(1.164 * nY + 2.018 * nU);
-        // 这里取的系数为1024，两边都同时乘上1024
-        int y1192 = 1192 * y;
-        int r = (y1192 + 1634 * v);
-        int g = (y1192 - 833 * v - 400 * u);
-        int b = (y1192 + 2066 * u);
-        // Clipping RGB values to be inside boundaries [ 0 , kMaxChannelValue ]
-        // KMaxChannelValue = 262143 即 2^18，原始范围应该限制在[0,255]之间，由于换成整数乘了1024故在[0,2^18]
-        r = r > kMaxChannelValue ? kMaxChannelValue : (r < 0 ? 0 : r);
-        g = g > kMaxChannelValue ? kMaxChannelValue : (g < 0 ? 0 : g);
-        b = b > kMaxChannelValue ? kMaxChannelValue : (b < 0 ? 0 : b);
-        // 本来应该是 int rgb = (0xFF << 24) | ((r & 0xFF) << 16) | ((g & 0xFF) << 8) | (b & 0xFF); ARGB
-        // 但是由于转换时乘了1024，需要除以1024，所以是如下的表达式
-        return 0xff000000 | ((r << 6) & 0xff0000) | ((g >> 2) & 0xff00) | ((b >> 10) & 0xff);
-    }
 };
-
 
 #endif //FFMPEGVIDEOPLAYER_STREAMPLAYER_H
